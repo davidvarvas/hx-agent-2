@@ -19,7 +19,8 @@ Local practice tests use the kit map, 24 matched seeds (200–223), `NOISE=0.6`,
 | Pursue isolated low-health opponents behind cover | 6.54 | Set aside. The matched comparison won 6 seeds, tied 13, and lost 5. |
 | Prefer a clear in-range attacker to a blocked target | 7.33 | Kept. Won 7 matched seeds, tied 15, and lost 2 against the 6.33 build. Official Docker check passed ([run](https://github.com/davidvarvas/mech-royale-bot-gpt/actions/runs/44845598957)). |
 | Rank gun upgrades by sustained damage at current weapon stats | 7.42 | Kept. The first drum magazine beats the damage upgrade at default stats, and the damage upgrade beats a second drum magazine. The simulator does not apply upgrade effects. The combined build averaged 12.88 over 24 matched local free-for-alls, up from 12.50. Official Docker check passed ([run](https://github.com/davidvarvas/mech-royale-bot-gpt/actions/runs/44845763942)). |
+| Use mortar during gun reloads when an open arc is available | 6.79 | Based on the official 4.08 build. The local simulator has no mortar. Twelve targeted firing checks and 24 open-lane trajectory cases passed. Official Docker check passed ([run](https://github.com/davidvarvas/mech-royale-bot-gpt/actions/runs/44846682270)). |
 
 The combat-loot build pins the Python image and NumPy. Local batch runs cap concurrency at two.
 
-Official practice scored **3.79** for `0003b8766127` and **4.08** for `89ec1cdb43ae`, each over 48 matches. The 4.08 run is the current official comparison point.
+Official practice scored **3.79** for `0003b8766127`, **4.08** for `89ec1cdb43ae`, and **3.94** for `e8e1c21728c8`, each over 48 matches. The 4.08 run remains the official comparison point. The 3.94 build's targeting and upgrade changes were set aside together.

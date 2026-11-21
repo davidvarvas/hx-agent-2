@@ -19,7 +19,6 @@ TAU = 2 * math.pi
 DEBUG = bool(__import__('os').environ.get('BOTDEBUG'))
 
 WEAPON_VALUE = {"lightning": 3.0, "laser": 2.7, "mortar": 1.6, "gun": 0.0}
-GUN_DPS_UPGRADES = ("gun_damage", "gun_rate", "gun_mag")
 UPGRADE_ORDER = [
     "plating", "nanites", "armor", "gun_damage", "gun_rate", "lightning_efficiency", "laser_charge",
     "laser_damage", "servos", "gyros", "gun_mag", "lightning_range", "sensors", "gun_velocity",
@@ -45,7 +44,6 @@ class Bot:
         self.rng = random.Random(hello.get("seed", 1))
         self.mech = cfg["mech"]
         self.W = cfg["weapons"]
-        self.upgrades = {upgrade["id"]: upgrade["effects"] for upgrade in cfg["upgrades"]}
         self.cube_growth = cfg["cubes"]["size_per_cube"]
         self.sim_step = 1 / cfg["match"]["tick_hz"]
         self.decision_span = self.sim_step * cfg["match"]["decide_every"]
@@ -91,6 +89,7 @@ class Bot:
         self.t0 = t0
         self.heavy_used = False
         self.mortar_sol = None
+        self.mortar_support_fire = False
         self.gun_solution = None
         self.direct_aim = None
         self.want_jump = False
@@ -168,7 +167,7 @@ class Bot:
         fire = [False, False]
         aim = None
         if fight or (target is not None and label in ("cover", "to cover", "kite")):
-            aim = self._lead_aim(target)
+            aim = self._lead_aim(target, support_mortar=fight)
             if fight:
                 fire = self._fire_control(target, aim, enemies, obs)
         if aim is None and aim_point is not None:
@@ -240,26 +239,13 @@ class Bot:
         self.threats = [th for th in self.threats if t - th[1] < 4.0][-30:]
 
     def _pick_upgrade(self, offer):
-        ranks = {upgrade: index for index, upgrade in enumerate(UPGRADE_ORDER)}
-        gun = self._weapons().get("gun")
-        if gun and any(choice["id"] in GUN_DPS_UPGRADES for choice in offer["choices"]):
-            stats = gun[1]["stats"]
-            dps_ranks = sorted(ranks[upgrade] for upgrade in GUN_DPS_UPGRADES)
-            dps_order = sorted(GUN_DPS_UPGRADES, key=lambda upgrade: self._gun_dps_after(stats, upgrade),
-                               reverse=True)
-            ranks.update(zip(dps_order, dps_ranks))
-        return min(range(len(offer["choices"])),
-                   key=lambda index: ranks.get(offer["choices"][index]["id"], len(ranks)), default=0)
-
-    def _gun_dps_after(self, stats, upgrade):
-        updated = dict(stats)
-        for effect in self.upgrades.get(upgrade, ()):
-            scope, _, stat = effect["path"].rpartition(".")
-            if scope == "weapons.gun" and stat in updated:
-                updated[stat] = updated[stat] * effect.get("mul", 1) + effect.get("add", 0)
-        mag = updated["mag"]
-        cycle = (mag - 1) * updated["cooldown"] + updated["reload"]
-        return updated["damage"] * mag / max(self.sim_step, cycle)
+        ids = [c["id"] for c in offer["choices"]]
+        best, bi = 1e9, 0
+        for i, u in enumerate(ids):
+            r = UPGRADE_ORDER.index(u) if u in UPGRADE_ORDER else 50
+            if r < best:
+                best, bi = r, i
+        return bi
 
     def _weapons(self):
         out = {}
@@ -395,11 +381,7 @@ class Bot:
             enemy["rear_angle"] = facing_error
 
     def _choose_target(self, enemies):
-        if not enemies:
-            return None
-        reach = max((w["stats"].get("range", 0) for w in self.me["weapons"] if w), default=0)
         best, best_score = None, math.inf
-        clear_threat, threat_score = None, math.inf
         for enemy in enemies:
             if enemy["d"] > self.W["laser"]["range"]:
                 continue
@@ -409,10 +391,6 @@ class Bot:
             score -= 0.25 if enemy["rear_angle"] > math.radians(self.mech["front_arc_deg"]) / 2 else 0.0
             if score < best_score:
                 best, best_score = enemy, score
-            if enemy["clear"] and enemy["aggressor"] and enemy["d"] <= reach and score < threat_score:
-                clear_threat, threat_score = enemy, score
-        if best is not None and not best["clear"] and clear_threat is not None:
-            return clear_threat
         return best
 
     def _should_fight(self, target, obs):
@@ -464,13 +442,20 @@ class Bot:
         return self.nav.los((x, y, z + self.muzzle), (ex, ey, center))
 
     # ================================================================== aiming
-    def _lead_aim(self, e):
+    def _lead_aim(self, e, support_mortar=False):
         weapons = self._weapons()
         _, gun = weapons.get("gun", (None, None))
         _, laser = weapons.get("laser", (None, None))
         _, mortar = weapons.get("mortar", (None, None))
         if not self.target_los and mortar:
             return self._mortar_aim(e, mortar)
+        if support_mortar and mortar and gun and (
+            not gun.get("ammo", 0) or gun.get("reload", 0) > 0.35
+        ):
+            support = self._mortar_support(e, mortar)
+            if support is not None:
+                aim, self.mortar_support_fire = support
+                return aim
 
         self.direct_aim, _, _ = self._intercept(e, self.sim_step)
         self.gun_solution = None
@@ -518,6 +503,70 @@ class Bot:
             turn *= laser[1]["stats"]["charge_turn_mult"]
         tilt = stats["pitch_rate"] * delay
         return yaw + max(-turn, min(turn, dyaw)), pitch + max(-tilt, min(tilt, dpitch))
+
+    def _mortar_support(self, enemy, mortar):
+        """Find a short open shot during a gun reload."""
+        shot = mortar["stats"]
+        delay = self._launch_delay(mortar)
+        splash = shot["splash_radius"]
+        if delay > self.decision_span or enemy["d"] < 3 * splash or self.nav is None:
+            return None
+
+        horizon = min(1.5, shot["ttl"])
+        speed = shot["speed"]
+        gravity = shot["gravity"]
+        stats = self.me["stats"]
+        x, y, z = self.pos
+        vx, vy, vz = self.me["vel"]
+        tube = (x + vx * delay, y + vy * delay, z + vz * delay + stats["height"] + 0.5)
+        barrel = stats["radius"] + 0.5
+        ex, ey, ez = enemy["pos"]
+        evx, evy, evz = enemy["vel"]
+        scale = self._size(enemy)
+        height = self.mech["height"] * scale
+
+        def required_vector(flight):
+            arrival = delay + flight
+            return (ex + evx * arrival - tube[0], ey + evy * arrival - tube[1],
+                    ez + height / 2 + evz * arrival - tube[2] + gravity * flight ** 2 / 2)
+
+        # The first root gives the short trajectory. The shell starts past the tube,
+        # so the distance traveled along the aim includes both barrel length and flight.
+        if math.hypot(*required_vector(horizon)) > barrel + speed * horizon:
+            return None
+        low, high = 0.0, horizon
+        for _ in range(10):
+            flight = (low + high) / 2
+            if math.hypot(*required_vector(flight)) > barrel + speed * flight:
+                low = flight
+            else:
+                high = flight
+        flight = (low + high) / 2
+        dx, dy, dz = required_vector(flight)
+        if math.hypot(dx - vx * flight, dy - vy * flight) < 2 * splash:
+            return None
+        aim = math.atan2(dy, dx), math.atan2(dz, math.hypot(dx, dy))
+        if not stats["min_pitch"] <= aim[1] <= stats["max_pitch"]:
+            return None
+
+        yaw, pitch = self._aim_at_launch(aim, delay)
+        direction = (math.cos(pitch) * math.cos(yaw), math.cos(pitch) * math.sin(yaw), math.sin(pitch))
+        distance = barrel + speed * flight
+        radius = self.mech["radius"] * scale
+        miss = math.hypot(distance * direction[0] - dx, distance * direction[1] - dy)
+        if miss > radius * 0.75 or abs(distance * direction[2] - dz) > height * 0.35:
+            return aim, False
+
+        steps = max(1, math.ceil(flight / 0.20))
+        points = [tube]
+        for step in range(steps + 1):
+            elapsed = flight * step / steps
+            reach = barrel + speed * elapsed
+            points.append((tube[0] + reach * direction[0], tube[1] + reach * direction[1],
+                           tube[2] + reach * direction[2] - gravity * elapsed ** 2 / 2))
+        if not self.nav.los_many(points[:-1], points[1:], step=1.0).all():
+            return None
+        return aim, True
 
     def _mortar_aim(self, e, w):
         x, y, z = self.pos
@@ -629,7 +678,9 @@ class Bot:
                     fire[i] = True
             elif k == "mortar":
                 sol = getattr(self, "mortar_sol", None)
-                if w.get("cooldown", 0) <= 0 and d3 > 3 * s["splash_radius"] and sol is not None and not los and \
+                if self.mortar_support_fire:
+                    fire[i] = True
+                elif w.get("cooldown", 0) <= 0 and d3 > 3 * s["splash_radius"] and sol is not None and not los and \
                         eyaw < 0.03 and epitch < 0.03 and self._mortar_path_ok(sol, s):
                     fire[i] = True
                 elif w.get("cooldown", 0) <= 0 and los and 25 < d3 < 140 and "gun" not in self._weapons():
