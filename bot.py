@@ -89,7 +89,6 @@ class Bot:
         self.t0 = t0
         self.heavy_used = False
         self.mortar_sol = None
-        self.mortar_support_fire = False
         self.gun_solution = None
         self.direct_aim = None
         self.want_jump = False
@@ -167,7 +166,7 @@ class Bot:
         fire = [False, False]
         aim = None
         if fight or (target is not None and label in ("cover", "to cover", "kite")):
-            aim = self._lead_aim(target, support_mortar=fight)
+            aim = self._lead_aim(target)
             if fight:
                 fire = self._fire_control(target, aim, enemies, obs)
         if aim is None and aim_point is not None:
@@ -442,20 +441,13 @@ class Bot:
         return self.nav.los((x, y, z + self.muzzle), (ex, ey, center))
 
     # ================================================================== aiming
-    def _lead_aim(self, e, support_mortar=False):
+    def _lead_aim(self, e):
         weapons = self._weapons()
         _, gun = weapons.get("gun", (None, None))
         _, laser = weapons.get("laser", (None, None))
         _, mortar = weapons.get("mortar", (None, None))
         if not self.target_los and mortar:
             return self._mortar_aim(e, mortar)
-        if support_mortar and mortar and gun and (
-            not gun.get("ammo", 0) or gun.get("reload", 0) > 0.35
-        ):
-            support = self._mortar_support(e, mortar)
-            if support is not None:
-                aim, self.mortar_support_fire = support
-                return aim
 
         self.direct_aim, _, _ = self._intercept(e, self.sim_step)
         self.gun_solution = None
@@ -503,70 +495,6 @@ class Bot:
             turn *= laser[1]["stats"]["charge_turn_mult"]
         tilt = stats["pitch_rate"] * delay
         return yaw + max(-turn, min(turn, dyaw)), pitch + max(-tilt, min(tilt, dpitch))
-
-    def _mortar_support(self, enemy, mortar):
-        """Find a short open shot during a gun reload."""
-        shot = mortar["stats"]
-        delay = self._launch_delay(mortar)
-        splash = shot["splash_radius"]
-        if delay > self.decision_span or enemy["d"] < 3 * splash or self.nav is None:
-            return None
-
-        horizon = min(1.5, shot["ttl"])
-        speed = shot["speed"]
-        gravity = shot["gravity"]
-        stats = self.me["stats"]
-        x, y, z = self.pos
-        vx, vy, vz = self.me["vel"]
-        tube = (x + vx * delay, y + vy * delay, z + vz * delay + stats["height"] + 0.5)
-        barrel = stats["radius"] + 0.5
-        ex, ey, ez = enemy["pos"]
-        evx, evy, evz = enemy["vel"]
-        scale = self._size(enemy)
-        height = self.mech["height"] * scale
-
-        def required_vector(flight):
-            arrival = delay + flight
-            return (ex + evx * arrival - tube[0], ey + evy * arrival - tube[1],
-                    ez + height / 2 + evz * arrival - tube[2] + gravity * flight ** 2 / 2)
-
-        # The first root gives the short trajectory. The shell starts past the tube,
-        # so the distance traveled along the aim includes both barrel length and flight.
-        if math.hypot(*required_vector(horizon)) > barrel + speed * horizon:
-            return None
-        low, high = 0.0, horizon
-        for _ in range(10):
-            flight = (low + high) / 2
-            if math.hypot(*required_vector(flight)) > barrel + speed * flight:
-                low = flight
-            else:
-                high = flight
-        flight = (low + high) / 2
-        dx, dy, dz = required_vector(flight)
-        if math.hypot(dx - vx * flight, dy - vy * flight) < 2 * splash:
-            return None
-        aim = math.atan2(dy, dx), math.atan2(dz, math.hypot(dx, dy))
-        if not stats["min_pitch"] <= aim[1] <= stats["max_pitch"]:
-            return None
-
-        yaw, pitch = self._aim_at_launch(aim, delay)
-        direction = (math.cos(pitch) * math.cos(yaw), math.cos(pitch) * math.sin(yaw), math.sin(pitch))
-        distance = barrel + speed * flight
-        radius = self.mech["radius"] * scale
-        miss = math.hypot(distance * direction[0] - dx, distance * direction[1] - dy)
-        if miss > radius * 0.75 or abs(distance * direction[2] - dz) > height * 0.35:
-            return aim, False
-
-        steps = max(1, math.ceil(flight / 0.20))
-        points = [tube]
-        for step in range(steps + 1):
-            elapsed = flight * step / steps
-            reach = barrel + speed * elapsed
-            points.append((tube[0] + reach * direction[0], tube[1] + reach * direction[1],
-                           tube[2] + reach * direction[2] - gravity * elapsed ** 2 / 2))
-        if not self.nav.los_many(points[:-1], points[1:], step=1.0).all():
-            return None
-        return aim, True
 
     def _mortar_aim(self, e, w):
         x, y, z = self.pos
@@ -678,9 +606,7 @@ class Bot:
                     fire[i] = True
             elif k == "mortar":
                 sol = getattr(self, "mortar_sol", None)
-                if self.mortar_support_fire:
-                    fire[i] = True
-                elif w.get("cooldown", 0) <= 0 and d3 > 3 * s["splash_radius"] and sol is not None and not los and \
+                if w.get("cooldown", 0) <= 0 and d3 > 3 * s["splash_radius"] and sol is not None and not los and \
                         eyaw < 0.03 and epitch < 0.03 and self._mortar_path_ok(sol, s):
                     fire[i] = True
                 elif w.get("cooldown", 0) <= 0 and los and 25 < d3 < 140 and "gun" not in self._weapons():
@@ -791,16 +717,18 @@ class Bot:
         ex, ey = tgt["pos"][0], tgt["pos"][1]
         d = tgt["d"]
         their = tgt.get("weapons") or []
+        finish = self._enemy_health(tgt) < 0.25 and self.hp_frac > 0.4
         if "lightning" in wk and self.me["energy"] > 25:
             want = 26.0
         elif "lightning" in their:
             want = 75.0
         elif "laser" in wk and "gun" not in wk:
             want = 110.0
+        elif "gun" in wk and not finish:
+            want = wk["gun"][1]["stats"]["range"] * 0.48
         else:
             want = 60.0
-        hpf_t = self._enemy_health(tgt)
-        if hpf_t < 0.25 and self.hp_frac > 0.4:
+        if finish:
             want *= 0.7
         ux, uy = norm2(ex - x, ey - y)
         radial = max(-1.0, min(1.0, (d - want) / max(15.0, want * 0.5)))
