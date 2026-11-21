@@ -128,7 +128,11 @@ class Bot:
 
         # ---------------- movement decision
         retreat = target is not None and self._should_retreat(target, enemies)
-        if zone_urgent:
+        final_move = self._final_approach(obs["zone"], fight)
+        if final_move is not None:
+            move = final_move
+            label = "final center"
+        elif zone_urgent:
             move = self._navigate(zone_goal)
             boost = not me["in_zone"] or self._outside_soon(obs)
             label = "zone"
@@ -150,10 +154,11 @@ class Bot:
             if loot is not None:
                 move, label = loot
 
-        if self.escape is not None and t < self.escape_until:
-            move = self.escape
-        move = self._dodge(obs, move)
-        move = self._keep_in_zone(obs, move)
+        if final_move is None:
+            if self.escape is not None and t < self.escape_until:
+                move = self.escape
+            move = self._dodge(obs, move)
+            move = self._keep_in_zone(obs, move)
 
         # ---------------- aim + fire
         fire = [False, False]
@@ -188,7 +193,8 @@ class Bot:
             act.update(tk)
 
         mvx, mvy = move
-        act["move"] = [round(mvx, 3), round(mvy, 3)]
+        precision = 7 if final_move is not None else 3
+        act["move"] = [round(mvx, precision), round(mvy, precision)]
         act["boost"] = bool(boost)
         if DEBUG and obs["tick"] % 10 == 0:
             g = self._weapons().get("gun")
@@ -288,6 +294,29 @@ class Bot:
             urgent = False
         self.zone_goal = goal
         return goal, urgent
+
+    def _final_approach(self, zone, fighting):
+        if zone["next_radius"] > 0 or self.t < zone["shrink_start"] - 4:
+            return None
+        x, y, z = self.pos
+        gx, gy = zone["next_center"]
+        stats = self.me["stats"]
+        speed = stats["walk_speed"]
+        distance = math.hypot(gx - x, gy - y)
+        if fighting and zone["radius"] > speed:
+            return None
+        if distance > speed * 0.85:
+            return None
+        if self.nav and distance > 1:
+            clearance = stats["step_up"] + 0.25
+            if not self.nav.los((x, y, z + clearance), (gx, gy, z + clearance)):
+                return None
+        # Near the point, request only the speed needed to reach it during the next decision.
+        # Slowing early gives the legs time to brake while the ring is still wide.
+        acceleration = stats["ground_accel"] if self.me["grounded"] else stats["air_accel"]
+        pace = min(speed, math.sqrt(acceleration * distance), distance / self.decision_span)
+        ux, uy = norm2(gx - x, gy - y)
+        return ux * pace / speed, uy * pace / speed
 
     def _outside_soon(self, obs):
         z = obs["zone"]

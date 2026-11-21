@@ -11,5 +11,8 @@ Local practice tests use the kit map, 24 matched seeds (200–223), `NOISE=0.6`,
 | Read weapon, movement, and hitbox values from live rules | 5.96 | Kept. Same score with the kit balance. Official Docker check passed ([run](https://github.com/davidvarvas/mech-royale-bot-gpt/actions/runs/44843004781)). |
 | Target direct threats and favor advantageous fights | 6.92 | Kept. A separate 24-seed free-for-all model improved from 12.00 to 12.58. Official Docker check passed ([run](https://github.com/davidvarvas/mech-royale-bot-gpt/actions/runs/44843441253)). |
 | Bound pathfinding work per decision | 6.67 | Kept for timing. The 24-match run had zero late actions, down from four, and a 25 ms observed maximum on the shared Mac. Official Docker check passed ([run](https://github.com/davidvarvas/mech-royale-bot-gpt/actions/runs/44843749860)). |
+| Approach and hold the exact final center | 6.21 | Kept for the final. The practice simulations ended before the last shrink. In three open-ground tests using the kit's acceleration and decision rate, the controller settled within one micrometer of center. Official Docker check passed ([run](https://github.com/davidvarvas/mech-royale-bot-gpt/actions/runs/44843893058)). |
 
 The combat-loot build pins the Python image and NumPy. Local batch runs cap concurrency at two.
+
+Official practice scored **3.79** over 48 matches for commit `0003b8766127`. It is the comparison point for later official runs.
