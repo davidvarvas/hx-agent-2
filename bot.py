@@ -136,6 +136,8 @@ class Bot:
             move = self._navigate(zone_goal)
             boost = not me["in_zone"] or self._outside_soon(obs)
             label = "zone"
+        elif (supply := self._supply_move(obs, enemies)) is not None:
+            move, label = supply
         elif retreat and not (target["d"] < 38 or t - self.last_dmg_t < 0.6 and self.target_los):
             move, label = self._retreat(enemies, zone_goal, obs)
             boost = me["energy"] > 30 and t - self.last_dmg_t < 1.5
@@ -920,6 +922,69 @@ class Bot:
                 return norm2(xy[0] - here[0], xy[1] - here[1]), label
         return None
 
+    def _supply_move(self, obs, enemies):
+        if not obs["drops"] or "drops" not in self.cfg:
+            return None
+        stats = self.me["stats"]
+        speed = stats["walk_speed"]
+        info = self.cfg["drops"]
+        cubes = self.cfg["cubes"]
+        missing_cubes = max(0, cubes["stat_cap"] - self.me["cubes"])
+        gain = (1 - self.hp_frac) * info["repair"] + min(missing_cubes, info["cubes"]) * cubes["hp_per_cube"] * 2
+        if gain < 0.05:
+            return None
+
+        x, y, _ = self.pos
+        best = None
+        for drop in obs["drops"]:
+            dx, dy, dz = drop["pos"]
+            radius = drop["radius"]
+            distance = math.hypot(dx - x, dy - y)
+            eta = max(0, distance - radius * 0.5) / speed
+            progress = drop["progress"] if drop["holder"] == self.me["id"] else 0
+            capture = drop["capture_s"] - progress
+            time_needed = max(eta, drop["lands_in"]) + capture
+            if time_needed > 9 + gain * 12 or drop["lands_in"] > eta + 5:
+                continue
+            if not self._in_zone_later(obs, (dx, dy), time_needed + 1):
+                continue
+
+            contested = False
+            lanes = 0
+            for enemy in enemies:
+                ex, ey, ez = enemy["pos"]
+                enemy_distance = math.hypot(dx - ex, dy - ey)
+                if enemy_distance < radius * 1.25 and self._enemy_health(enemy) > 0.2:
+                    contested = True
+                    break
+                if not enemy["aggressor"] or enemy_distance > self.W["gun"]["range"] * 0.75:
+                    continue
+                if self.nav is None or self.nav.los(
+                    (ex, ey, ez + self.mech["muzzle_height"] * self._size(enemy)),
+                    (dx, dy, dz + stats["height"] / 2),
+                ):
+                    lanes += 1
+            if contested or lanes > 1 or (lanes and time_needed > 7 + gain * 4):
+                continue
+            score = (gain + progress / drop["capture_s"]) / (1 + time_needed + 2 * lanes)
+            if best is None or score > best[0]:
+                best = score, drop, distance, lanes
+
+        if best is None:
+            return None
+        _, drop, distance, lanes = best
+        center = drop["pos"][:2]
+        if distance > drop["radius"] * 0.6:
+            return self._navigate(center), "drop"
+        if lanes:
+            # Keep moving inside the ring while another mech has a firing lane.
+            angle = self.t * 1.7 + self.scan_phase
+            inner = drop["radius"] * 0.38
+            vx = (center[0] + math.cos(angle) * inner - x) * 2 / speed
+            vy = (center[1] + math.sin(angle) * inner - y) * 2 / speed
+            return self._clamp(vx, vy), "capturing under fire"
+        return (0.0, 0.0), "capturing"
+
     def _peaceful(self, obs, npcs, zone_goal):
         x, y, z = self.pos
         t = self.t
@@ -928,15 +993,6 @@ class Bot:
         wk = self._weapons()
         ok = lambda p: self._in_zone_later(obs, p, 10.0, 10.0)
         hurt = self.hp_frac < 0.65
-
-        # supply drop
-        for dr in obs.get("drops") or []:
-            dp = dr["pos"]
-            dd = math.dist((x, y), dp[:2])
-            if dd < 170 and dr["lands_in"] < dd / me["stats"]["walk_speed"] + 3 and ok(dp[:2]):
-                if dd > dr["radius"] * 0.5:
-                    return self._navigate(dp[:2]), None, "drop"
-                return (0.0, 0.0), None, "capturing"
 
         if hurt:
             return self._heal(obs, zone_goal)

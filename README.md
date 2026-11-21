@@ -2,7 +2,7 @@
 
 Survivor is a Mech Royale bot for the Builders Buildathon. It uses the live `mechfight/1` rules, weapon stats, and the official arena supplied in each match.
 
-The bot rotates inside the shrinking zone, uses buildings to limit the number of opponents with a clear shot, and picks up nearby loot while keeping aim on a duel. Gun aim accounts for target motion, the firing tick, and turret turn speed. It supports the gun, laser, lightning, and mortar.
+The bot rotates inside the shrinking zone, uses buildings to limit the number of opponents with a clear shot, and picks up nearby loot while keeping aim on a duel. Gun aim accounts for target motion, the firing tick, and turret turn speed. It supports the gun, laser, lightning, and mortar. It can hold a viable repair drop under fire and brakes toward the center of the final circle.
 
 The Docker image pins the Python base image and uses NumPy 2.1.3 for map geometry. The code is MIT-licensed.
 
