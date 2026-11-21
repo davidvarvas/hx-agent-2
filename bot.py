@@ -115,9 +115,10 @@ class Bot:
         enemies.sort(key=lambda e: e["d"])
 
         zone_goal, zone_urgent = self._zone_goal(obs)
+        self._measure_threats(enemies)
         target = self._choose_target(enemies)
-        fight = target is not None and self._should_fight(target, enemies)
-        self.target_los = target is not None and self._has_los(target)
+        self.target_los = target is not None and target["clear"]
+        fight = target is not None and self._should_fight(target, obs)
 
         move = (0.0, 0.0)
         boost = False
@@ -133,10 +134,10 @@ class Bot:
         elif retreat and not (target["d"] < 38 or t - self.last_dmg_t < 0.6 and self.target_los):
             move, label = self._retreat(enemies, zone_goal, obs)
             boost = me["energy"] > 30 and t - self.last_dmg_t < 1.5
-        elif target is not None and (fight or target["d"] < 70) and self._outnumbered(enemies):
+        elif fight and self._outnumbered(enemies):
             move, label = self._retreat(enemies, zone_goal, obs, fight_target=target)
             boost = me["energy"] > 45 and t - self.last_dmg_t < 1.0
-        elif target is not None and (fight or target["d"] < 70):
+        elif fight:
             move = self._fight_move(target, enemies, zone_goal, obs)
             boost = me["energy"] > 45 and t - self.last_dmg_t < 1.0
             label = f"fight {target['id']}"
@@ -156,9 +157,9 @@ class Bot:
         # ---------------- aim + fire
         fire = [False, False]
         aim = None
-        if target is not None and (fight or aim_point is None):
+        if fight or (target is not None and label in ("cover", "to cover", "kite")):
             aim = self._lead_aim(target)
-            if fight or t - self.attackers.get(target["id"], -99) < 4:
+            if fight:
                 fire = self._fire_control(target, aim, enemies, obs)
         if aim is None and aim_point is not None:
             aim = self._aim_at_point(aim_point)
@@ -322,34 +323,60 @@ class Bot:
         return mx, my
 
     # ================================================================== targets
+    def _measure_threats(self, enemies):
+        if not enemies:
+            return
+        x, y, z = self.pos
+        source = [(x, y, z + self.muzzle)] * len(enemies)
+        target = [(ex, ey, ez + self.mech["height"] * self._size(enemy) / 2)
+                  for enemy in enemies for ex, ey, ez in (enemy["pos"],)]
+        exposed = self.nav.los_many(source, target) if self.nav else [True] * len(enemies)
+        since_attack = self.me["stats"]["regen_delay"] * 1.5
+        for enemy, clear in zip(enemies, exposed):
+            ex, ey, _ = enemy["pos"]
+            distance = max(1, enemy["d"])
+            dx, dy = x - ex, y - ey
+            facing_error = abs(wrap(math.atan2(dy, dx) - enemy["aim"][0]))
+            evx, evy, _ = enemy["vel"]
+            closing_speed = (evx * dx + evy * dy) / distance
+            close = distance < self.cfg["vision"]["near_range"]
+            aiming_here = facing_error < math.atan2(self.mech["radius"] * 3, distance) + 0.12
+            moving_here = close and facing_error < 0.75 and closing_speed > self.mech["walk_speed"] * 0.3
+            enemy["clear"] = bool(clear)
+            enemy["aggressor"] = (self.t - self.attackers.get(enemy["id"], -math.inf) < since_attack
+                                  or (clear and (aiming_here or moving_here)))
+            enemy["rear_angle"] = facing_error
+
     def _choose_target(self, enemies):
-        best, bs = None, 1e9
-        t = self.t
-        for e in enemies:
-            if e["d"] > 260:
+        best, best_score = None, math.inf
+        for enemy in enemies:
+            if enemy["d"] > self.W["laser"]["range"]:
                 continue
-            hpf = self._enemy_health(e)
-            s = e["d"] / 90.0 + hpf * 1.6
-            if t - self.attackers.get(e["id"], -99) < 3:
-                s -= 1.0
-            if e.get("charging"):
-                s -= 0.4
-            if s < bs:
-                best, bs = e, s
+            score = enemy["d"] / 90 + 1.6 * self._enemy_health(enemy)
+            score += 0.7 if not enemy["clear"] else 0.0
+            score -= 1.1 if enemy["aggressor"] else 0.0
+            score -= 0.25 if enemy["rear_angle"] > math.radians(self.mech["front_arc_deg"]) / 2 else 0.0
+            if score < best_score:
+                best, best_score = enemy, score
         return best
 
-    def _should_fight(self, tgt, enemies):
-        t = self.t
-        if t - self.attackers.get(tgt["id"], -99) < 6:
+    def _should_fight(self, target, obs):
+        if target["aggressor"]:
             return True
-        hpf = self._enemy_health(tgt)
-        if tgt["d"] < 110:
+        if not self.target_los:
+            return False
+        weapons = self._weapons()
+        gun_range = self.W["gun"]["range"]
+        if "gun" in weapons:
+            gun_range = weapons["gun"][1]["stats"]["range"]
+        health = self._enemy_health(target)
+        if health < 0.43 and target["d"] < gun_range * 0.85:
             return True
-        if hpf < 0.45 and tgt["d"] < 200:
-            return True
-        if self.hp_frac > 0.75 and tgt["d"] < 160:
-            return True
-        return False
+        if obs["alive"] <= 3 and target["d"] < gun_range * 0.65:
+            return self.hp_frac > 0.5 or health < self.hp_frac
+        early = self.t < self.cfg["zone"]["phases"][0]["hold_s"]
+        advantage = self.hp_frac > 0.78 and (len(weapons) > len(target.get("weapons", ())) or health < 0.65)
+        return not early and advantage and target["d"] < gun_range * 0.5
 
     def _should_retreat(self, tgt, enemies):
         my = self.me["hp"]
@@ -364,8 +391,7 @@ class Bot:
         return False
 
     def _outnumbered(self, enemies):
-        close = [e for e in enemies if e["d"] < 170]
-        return len(close) >= 2
+        return sum(e["d"] < 170 and (e["clear"] or e["aggressor"]) for e in enemies) >= 2
 
     def _enemy_health(self, actor):
         maximum = actor.get("max_hp", self.mech["hp"])
