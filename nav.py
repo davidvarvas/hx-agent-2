@@ -15,7 +15,10 @@ NEG = -1e4
 
 
 class NavMap:
-    def __init__(self, map_dir, mech_height=9.0, step_up=1.2):
+    def __init__(self, map_dir, mech):
+        mech_height = mech["height"]
+        step_up = mech["step_up"]
+        required_clearance = math.ceil(mech["radius"] / CELL)
         with open(os.path.join(map_dir, "v2", "world.json")) as f:
             w = json.load(f)
         t = w["terrain"]
@@ -56,7 +59,7 @@ class NavMap:
         dzx = np.abs(np.diff(g, axis=1))
         dzy = np.abs(np.diff(g, axis=0))
         steep = np.zeros_like(solid)
-        lim = CELL * math.tan(math.radians(50)) * 0.95
+        lim = CELL * math.tan(math.radians(mech["max_slope_deg"])) * 0.95
         steep[:, 1:] |= dzx > lim
         steep[:, :-1] |= dzx > lim
         steep[1:, :] |= dzy > lim
@@ -67,8 +70,8 @@ class NavMap:
         # height of whatever is solid in the cell (for LOS against roofs, and for "standing on a roof")
         self.solid_top = np.where(self.top > g, self.top, g)
         self.clear = self._clearance(blocked)  # distance to nearest blocked cell, in cells
-        self.free_flat = (self.clear >= 2).ravel().tolist()      # comfortable for a 2.5 m radius
-        self.free_tight = (self.clear >= 1).ravel().tolist()
+        self.free_flat = (self.clear >= required_clearance).ravel().tolist()
+        self.free_tight = (self.clear >= max(1, required_clearance - 1)).ravel().tolist()
         self.cost_flat = np.where(self.clear >= 4, 1.0, np.where(self.clear >= 3, 1.3, 2.0)).ravel().tolist()
         # coarse 4 m grid for path search: a coarse cell is free if any of its 2x2 fine cells is comfortable
         cny, cnx = ny // 2, nx // 2
@@ -76,7 +79,7 @@ class NavMap:
         c = blk.max(axis=(1, 3))
         cmin = blk.min(axis=(1, 3))
         self.cnx, self.cny = cnx, cny
-        self.cfree = ((c >= 2) & (cmin >= 1)).ravel().tolist()
+        self.cfree = ((c >= required_clearance) & (cmin >= 1)).ravel().tolist()
         self.ccost = np.where(c >= 5, 1.0, np.where(c >= 3, 1.25, 1.8)).ravel().tolist()
 
     # ------------------------------------------------------------------ build helpers

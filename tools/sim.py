@@ -61,7 +61,7 @@ class Sim:
         self.rng = random.Random(seed)
         hello = json.loads(__import__("gzip").open(os.path.join(KIT, "check/stream.jsonl.gz"), "rt").readline())
         self.cfg = hello["config"]
-        self.nav = nav.NavMap(os.path.join(KIT, "arena"))
+        self.nav = nav.NavMap(os.path.join(KIT, "arena"), self.cfg["mech"])
         self.dt = 1.0 / self.cfg["match"]["tick_hz"]
         self.tick = 0
         self.t = 0.0

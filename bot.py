@@ -44,13 +44,14 @@ class Bot:
         self.rng = random.Random(hello.get("seed", 1))
         self.mech = cfg["mech"]
         self.W = cfg["weapons"]
+        self.cube_growth = cfg["cubes"]["size_per_cube"]
         self.sim_step = 1 / cfg["match"]["tick_hz"]
         self.decision_span = self.sim_step * cfg["match"]["decide_every"]
         self.reach = cfg["loot"]["pickup_radius"]
         self.nav = None
         if nav is not None:
             try:
-                self.nav = nav.NavMap(hello["map"]["dir"], self.mech["height"], self.mech["step_up"])
+                self.nav = nav.NavMap(hello["map"]["dir"], self.mech)
             except Exception as e:  # keep playing without the map
                 mf.log("map load failed:", repr(e))
         self.t = 0.0
@@ -96,8 +97,7 @@ class Bot:
         x, y, z = self.pos = me["pos"]
         self.hp_frac = me["hp"] / max(1.0, me["max_hp"])
         st = me["stats"]
-        self.muzzle = st.get("muzzle_height", 7.0)
-        self.eye = st.get("eye_height", 8.0)
+        self.muzzle = st["muzzle_height"]
         act = {"tick": obs["tick"]}
         self._events(obs)
         if obs.get("offer"):
@@ -165,7 +165,7 @@ class Bot:
             fire = self._fire_at_object(aim, aim_point, obs)
         if aim is None:
             aim = self._idle_aim(obs, move)
-        act["aim"] = [wrap(aim[0]), max(self.mech["min_pitch"], min(self.mech["max_pitch"], aim[1]))]
+        act["aim"] = [wrap(aim[0]), max(st["min_pitch"], min(st["max_pitch"], aim[1]))]
 
         # laser charge needs fire held across ticks; lightning/gun fire are one-shot holds
         act["fire"] = fire
@@ -260,7 +260,7 @@ class Bot:
         x, y = self.pos[0], self.pos[1]
         t = self.t
         nc, nr = z["next_center"], z["next_radius"]
-        speed = self.me["stats"].get("walk_speed", 11.7)
+        speed = self.me["stats"]["walk_speed"]
         margin = max(6.0, min(30.0, nr * 0.25))
         dn = math.dist((x, y), nc)
         target_r = max(0.0, nr - margin)
@@ -328,7 +328,7 @@ class Bot:
         for e in enemies:
             if e["d"] > 260:
                 continue
-            hpf = e["hp"] / max(1.0, e.get("max_hp", 1400))
+            hpf = self._enemy_health(e)
             s = e["d"] / 90.0 + hpf * 1.6
             if t - self.attackers.get(e["id"], -99) < 3:
                 s -= 1.0
@@ -342,7 +342,7 @@ class Bot:
         t = self.t
         if t - self.attackers.get(tgt["id"], -99) < 6:
             return True
-        hpf = tgt["hp"] / max(1.0, tgt.get("max_hp", 1400))
+        hpf = self._enemy_health(tgt)
         if tgt["d"] < 110:
             return True
         if hpf < 0.45 and tgt["d"] < 200:
@@ -353,7 +353,7 @@ class Bot:
 
     def _should_retreat(self, tgt, enemies):
         my = self.me["hp"]
-        th = tgt["hp"]
+        th = tgt.get("hp", self.mech["hp"])
         close = [e for e in enemies if e["d"] < 120]
         if self.hp_frac < 0.3 and th > my * 0.8:
             return True
@@ -367,13 +367,20 @@ class Bot:
         close = [e for e in enemies if e["d"] < 170]
         return len(close) >= 2
 
+    def _enemy_health(self, actor):
+        maximum = actor.get("max_hp", self.mech["hp"])
+        return actor.get("hp", maximum) / max(1, maximum)
+
+    def _size(self, actor):
+        return 1 + self.cube_growth * actor.get("cubes", 0)
+
     def _has_los(self, e):
         if self.nav is None:
             return True
         x, y, z = self.pos
         ex, ey, ez = e["pos"]
-        sc = 1 + 0.05 * e.get("cubes", 0)
-        return self.nav.los((x, y, z + self.muzzle), (ex, ey, ez + 4.5 * sc))
+        center = ez + self.mech["height"] * self._size(e) / 2
+        return self.nav.los((x, y, z + self.muzzle), (ex, ey, center))
 
     # ================================================================== aiming
     def _lead_aim(self, e):
@@ -403,7 +410,7 @@ class Bot:
         origin = (x + vx * delay, y + vy * delay, z + self.muzzle + vz * delay)
         ex, ey, ez = enemy["pos"]
         evx, evy, evz = enemy["vel"]
-        scale = 1 + self.cfg["cubes"]["size_per_cube"] * enemy.get("cubes", 0)
+        scale = self._size(enemy)
         ez += self.mech["height"] * scale / 2
         airborne = abs(evz) > 0.05
         gravity = self.mech["gravity"] if airborne else 0
@@ -425,16 +432,19 @@ class Bot:
         dyaw = wrap(command[0] - yaw)
         dpitch = max(stats["min_pitch"], min(stats["max_pitch"], command[1])) - pitch
         turn = stats["turn_rate"] * delay
+        laser = self._weapons().get("laser")
+        if laser and laser[1].get("charge", 0):
+            turn *= laser[1]["stats"]["charge_turn_mult"]
         tilt = stats["pitch_rate"] * delay
         return yaw + max(-turn, min(turn, dyaw)), pitch + max(-tilt, min(tilt, dpitch))
 
     def _mortar_aim(self, e, w):
         x, y, z = self.pos
-        mz = z + st_h(self.me) + 0.5
+        mz = z + self.me["stats"]["height"] + 0.5
         ex, ey, ez = e["pos"]
         vx, vy, _ = e.get("vel", (0, 0, 0))
-        v = w["stats"].get("speed", 72.0)
-        g = w["stats"].get("gravity", 22.0)
+        v = w["stats"]["speed"]
+        g = w["stats"]["gravity"]
         tt = 0.0
         sol = None
         for _ in range(3):
@@ -445,11 +455,10 @@ class Bot:
             if disc < 0 or d < 1:
                 break
             th = math.atan((v * v + math.sqrt(disc)) / (g * d))  # high arc: clears buildings
-            if th > self.mech["max_pitch"]:
+            if th > self.me["stats"]["max_pitch"]:
                 th = math.atan((v * v - math.sqrt(disc)) / (g * d))
             sol = (math.atan2(py - y, px - x), th)
             tt = d / max(1e-3, v * math.cos(th))
-        self.aim_pred = (ex, ey, ez)
         self.mortar_sol = sol
         if sol is None:
             return (math.atan2(ey - y, ex - x), 0.0)
@@ -489,7 +498,7 @@ class Bot:
         fire = [False, False]
         me = self.me
         d3 = math.dist(self.pos, e["pos"])
-        sc = 1 + self.cfg["cubes"]["size_per_cube"] * e.get("cubes", 0)
+        sc = self._size(e)
         rad = self.mech["radius"] * sc
         eyaw, epitch = self._aim_err(aim)
         tol = math.atan2(rad * 0.8, max(1.0, d3))
@@ -499,7 +508,7 @@ class Bot:
             if not w:
                 continue
             k = w["kind"]
-            s = w.get("stats", {})
+            s = w["stats"]
             if k == "gun":
                 delay = self._launch_delay(w)
                 if not los or self.gun_solution is None or delay > self.decision_span or d3 >= s["range"]:
@@ -510,9 +519,9 @@ class Bot:
                     continue
                 fire[i] = self.nav is None or self.nav.los(origin, point)
             elif k == "lightning":
-                rng = s.get("range", 45)
-                cone = math.radians(s.get("cone_deg", 30)) / 2
-                cost = s.get("energy", 3)
+                rng = s["range"]
+                cone = math.radians(s["cone_deg"]) / 2
+                cost = s["energy"]
                 if me["energy"] > cost + 8:
                     for o in enemies:
                         if o["d"] < rng * 0.95:
@@ -522,41 +531,43 @@ class Bot:
                                 break
             elif k == "laser":
                 charge = w.get("charge", 0) or 0
-                full = s.get("charge", 0.75)
-                shorted = any(o["d"] < 50 and "lightning" in (o.get("weapons") or []) for o in enemies)
+                full = s["charge"]
+                shorted = any(o["d"] < self.W["lightning"]["range"] * 1.1 and "lightning" in o.get("weapons", ())
+                              for o in enemies)
                 if charge > 0:
                     # holding: release when aimed (beam is hitscan) or keep holding
                     ready = charge >= full * 0.97
                     yaw, pitch = self._aim_at_launch(aim, self.sim_step)
                     on = (los and self.direct_aim is not None and d3 <= s["range"] and abs(wrap(yaw - self.direct_aim[0])) < tol
                           and abs(pitch - self.direct_aim[1]) < ptol)
-                    fire[i] = not (ready and on) and charge < full + s.get("hold_s", 2) - 0.15
+                    fire[i] = not (ready and on) and charge < full + s["hold_s"] - 0.15
                     if not los and charge >= full:
                         fire[i] = True  # keep it charged while target is behind cover
-                elif w.get("cooldown", 0) <= 0.05 and los and d3 < s.get("range", 280) * 0.95 and not shorted \
+                elif w["cooldown"] <= self.sim_step and los and d3 < s["range"] * 0.95 and not shorted \
                         and eyaw < 0.5:
                     fire[i] = True
             elif k == "mortar":
                 sol = getattr(self, "mortar_sol", None)
-                if w.get("cooldown", 0) <= 0 and 22 < d3 < 230 and sol is not None and not los and \
-                        eyaw < 0.03 and epitch < 0.03 and self._mortar_path_ok(sol):
+                if w.get("cooldown", 0) <= 0 and d3 > 3 * s["splash_radius"] and sol is not None and not los and \
+                        eyaw < 0.03 and epitch < 0.03 and self._mortar_path_ok(sol, s):
                     fire[i] = True
                 elif w.get("cooldown", 0) <= 0 and los and 25 < d3 < 140 and "gun" not in self._weapons():
                     fire[i] = eyaw < tol and epitch < ptol
         return fire
 
-    def _mortar_path_ok(self, sol):
+    def _mortar_path_ok(self, sol, stats):
         if self.nav is None:
             return True
         x, y, z = self.pos
-        mz = z + st_h(self.me) + 0.5
-        v = 72.0
+        mz = z + self.me["stats"]["height"] + 0.5
+        v = stats["speed"]
+        g = stats["gravity"]
         yaw, th = sol
         pts = []
         for k in range(1, 7):
             tt = k * 0.25
             h = v * math.cos(th) * tt
-            pts.append((x + math.cos(yaw) * h, y + math.sin(yaw) * h, mz + v * math.sin(th) * tt - 11 * tt * tt))
+            pts.append((x + math.cos(yaw) * h, y + math.sin(yaw) * h, mz + v * math.sin(th) * tt - 0.5 * g * tt * tt))
         A = [(x, y, mz)] + pts[:-1]
         return bool(self.nav.los_many(A, pts).all())
 
@@ -567,7 +578,7 @@ class Bot:
         fire = [False, False]
         d = math.dist(self.pos, p)
         eyaw, epitch = self._aim_err(aim)
-        rad = 1.4 if self.farm_kind == "crate" else 1.8
+        rad = self.cfg["crates" if self.farm_kind == "crate" else "npc"]["radius"]
         tol = math.atan2(rad * 0.8, max(1.0, d)) + 0.004
         x, y, z = self.pos
         if self.nav is not None and not self.nav.los((x, y, z + self.muzzle), p):
@@ -575,9 +586,9 @@ class Bot:
         for i, w in enumerate(self.me["weapons"]):
             if not w:
                 continue
-            if w["kind"] == "gun" and w.get("ammo", 1) > 0 and w.get("reload", 0) == 0 and eyaw < tol and epitch < tol * 2 + 0.01 and d < 200:
+            if w["kind"] == "gun" and w.get("ammo", 1) > 0 and w.get("reload", 0) == 0 and eyaw < tol and epitch < tol * 2 + 0.01 and d < w["stats"]["range"] * 0.87:
                 fire[i] = True
-            if w["kind"] == "lightning" and d < w["stats"].get("range", 45) * 0.9 and eyaw < 0.2 and self.me["energy"] > 40:
+            if w["kind"] == "lightning" and d < w["stats"]["range"] * 0.9 and eyaw < 0.2 and self.me["energy"] > 40:
                 fire[i] = True
         return fire
 
@@ -589,7 +600,7 @@ class Bot:
         if w.get("reload", 0) > 0:
             return
         ammo = w.get("ammo", 0)
-        mag = w["stats"].get("mag", 12)
+        mag = w["stats"]["mag"]
         if ammo == 0 or (ammo < mag * 0.5 and (target is None or not self.target_los) and self.t - self.last_dmg_t > 1.5):
             act["reload"] = True
             act["fire"][i] = False
@@ -656,7 +667,7 @@ class Bot:
             want = 110.0
         else:
             want = 60.0
-        hpf_t = tgt["hp"] / max(1.0, tgt.get("max_hp", 1400))
+        hpf_t = self._enemy_health(tgt)
         if hpf_t < 0.25 and self.hp_frac > 0.4:
             want *= 0.7
         ux, uy = norm2(ex - x, ey - y)
@@ -730,8 +741,8 @@ class Bot:
             gz = n.ground_at(px, py) if (px, py) != (x, y) else z
             for e in threats:
                 ex, ey, ez = e["pos"]
-                A.append((ex, ey, ez + 7.5))
-                B.append((px, py, gz + 5.0))
+                A.append((ex, ey, ez + self.mech["muzzle_height"] * self._size(e)))
+                B.append((px, py, gz + self.me["stats"]["height"] * 0.55))
         vis = n.los_many(np.array(A, np.float32), np.array(B, np.float32), step=2.0)
         k = len(threats)
         best, bs = None, 1e9
@@ -760,7 +771,8 @@ class Bot:
         """Step away from incoming mortar shells' landing points and laser lines aimed at us."""
         x, y, z = self.pos
         mx, my = move
-        g = self.W["mortar"].get("gravity", 22.0)
+        mortar = self.W["mortar"]
+        g = mortar["gravity"]
         for p in obs.get("projectiles") or []:
             if p["kind"] != "mortar":
                 continue
@@ -776,7 +788,7 @@ class Bot:
                 continue
             lx, ly = px + vx * tt, py + vy * tt
             dd = math.hypot(lx - x, ly - y)
-            if dd < 11:
+            if dd < mortar["splash_radius"] + self.me["stats"]["radius"] + 1.5:
                 ax, ay = norm2(x - lx, y - ly) if dd > 0.5 else (math.cos(self.t), math.sin(self.t))
                 mx += ax * 2.0
                 my += ay * 2.0
@@ -865,8 +877,8 @@ class Bot:
         for dr in obs.get("drops") or []:
             dp = dr["pos"]
             dd = math.dist((x, y), dp[:2])
-            if dd < 170 and dr.get("lands_in", 0) < dd / 11.7 + 3 and ok(dp[:2]):
-                if dd > dr.get("radius", 8) * 0.5:
+            if dd < 170 and dr["lands_in"] < dd / me["stats"]["walk_speed"] + 3 and ok(dp[:2]):
+                if dd > dr["radius"] * 0.5:
                     return self._navigate(dp[:2]), None, "drop"
                 return (0.0, 0.0), None, "capturing"
 
@@ -918,12 +930,12 @@ class Bot:
         if best:
             dd, cp = best
             self.farm_kind = "crate"
-            p = (cp[0], cp[1], cp[2] + 1.2)
+            p = (cp[0], cp[1], cp[2] + self.cfg["crates"]["height"] / 2)
             mv = (0.0, 0.0) if dd < 35 else self._navigate(cp[:2])
             return mv, p, "crate"
 
         # NPC drones: two cubes each, shoot from outside their aggro range
-        if self.hp_frac > 0.6 and me["cubes"] < 10 and "gun" in wk:
+        if self.hp_frac > 0.6 and me["cubes"] < self.cfg["cubes"]["stat_cap"] and "gun" in wk:
             best = None
             for nn in npcs:
                 dd = math.dist((x, y), nn["pos"][:2])
@@ -933,7 +945,9 @@ class Bot:
                 dd, nn = best
                 self.farm_kind = "npc"
                 p = nn["pos"]
-                aimp = (p[0] + nn["vel"][0] * dd / 252, p[1] + nn["vel"][1] * dd / 252, p[2] + 1.75)
+                travel = dd / wk["gun"][1]["stats"]["speed"]
+                aimp = (p[0] + nn["vel"][0] * travel, p[1] + nn["vel"][1] * travel,
+                        p[2] + self.cfg["npc"]["height"] / 2)
                 if dd > 85:
                     mv = self._navigate(p[:2])
                 elif dd < 55:
@@ -982,7 +996,8 @@ class Bot:
         d = math.dist((x, y), nc)
         if d > max(3.0, nr * 0.35):
             mx, my = self._navigate(nc)
-            return mx * 0.4, my * 0.4  # 0.4 * 11.7 < 5 m/s: no footstep sound
+            move = min(0.4, 0.98 * self.cfg["sound"]["step_speed"] / self.me["stats"]["walk_speed"])
+            return mx * move, my * move
         return (0.0, 0.0)
 
     def _ground(self, p):
@@ -1022,14 +1037,6 @@ class Bot:
                 out["drop"] = i
             return out
         return None
-
-
-def t_attacked(bot, e):
-    return bot.t - bot.attackers.get(e["id"], -99) < 3
-
-
-def st_h(me):
-    return me["stats"].get("height", 9.0)
 
 
 mf.run(Bot)

@@ -1,12 +1,19 @@
-# survivor — Mech Royale bot
+# Survivor
 
-A mechfight/1 bot that plays for placement:
+Survivor is a Mech Royale bot for the Builders Buildathon. It uses the live `mechfight/1` rules, weapon stats, and the official arena supplied in each match.
 
-- **Zone first:** rotates into the next circle before it shrinks; never steps across the closing edge.
-- **Fights facing the enemy** (rear hits do 1.5x), strafing with lead-aimed gun fire; laser is charged and released on target; lightning fires when someone is in the cone; mortar lobs over cover.
-- **Outnumbered:** moves to the nearby spot the fewest enemies can see while keeping its target in view; when losing, breaks line of sight to regenerate.
-- **Between fights:** takes cubes, weapons (lightning > laser > mortar, keeps the gun), crates, NPC drones and supply drops.
-- **Upgrades:** plating, armor, repair nanites first.
+The bot rotates inside the shrinking zone, uses buildings to limit the number of opponents with a clear shot, and picks up nearby loot while keeping aim on a duel. Gun aim accounts for target motion, the firing tick, and turret turn speed. It supports the gun, laser, lightning, and mortar.
 
-Files: `bot.py` (decisions), `nav.py` (2 m grid of the map: line of sight with numpy, A* on a 4 m grid), `mechfight.py` (stdin/stdout loop).
-Answers in ~1 ms typically, under 10 ms worst case.
+The Docker image pins the Python base image and uses NumPy 2.1.3 for map geometry. The code is MIT-licensed.
+
+## Check the bot
+
+Keep the official `mechfight-kit` folder beside this checkout. Build from this repository and run the evaluator from the kit directory.
+
+```sh
+docker build --platform linux/amd64 -t my-bot .
+cd ../mechfight-kit
+python3 check/check.py --map-dir /arena -- docker run --rm -i --network none --cpus 1 --memory 512m --read-only --tmpfs /tmp:rw,size=64m --user 65534:65534 -v "$PWD/arena:/arena:ro" my-bot
+```
+
+The approximate practice simulator needs NumPy. From the repository root, run `NOISE=0.6 J=2 SEED0=200 python3 tools/batch.py 24 -- python3 -u bot.py`. See [CHANGELOG.md](CHANGELOG.md) for measured comparisons and official Docker checks.
