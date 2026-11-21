@@ -27,10 +27,28 @@ index e977884..0336ed1 100644
  COPY mechfight.py nav.py bot.py ./
  RUN python3 -m compileall -q /bot
 diff --git a/bot.py b/bot.py
-index 4dd3ec0..965d7d6 100644
+index 4dd3ec0..219ec5a 100644
 --- a/bot.py
 +++ b/bot.py
-@@ -139,6 +139,11 @@ class Bot:
+@@ -44,6 +44,8 @@ class Bot:
+         self.rng = random.Random(hello.get("seed", 1))
+         self.mech = cfg["mech"]
+         self.W = cfg["weapons"]
++        self.sim_step = 1 / cfg["match"]["tick_hz"]
++        self.decision_span = self.sim_step * cfg["match"]["decide_every"]
+         self.reach = cfg["loot"]["pickup_radius"]
+         self.nav = None
+         if nav is not None:
+@@ -85,6 +87,8 @@ class Bot:
+         self.t0 = t0
+         self.heavy_used = False
+         self.mortar_sol = None
++        self.gun_solution = None
++        self.direct_aim = None
+         self.want_jump = False
+         self.farm_kind = None
+         t = self.t = obs["t"]
+@@ -139,6 +143,11 @@ class Bot:
          else:
              move, aim_point, label = self._peaceful(obs, npcs, zone_goal)
  
@@ -42,7 +60,7 @@ index 4dd3ec0..965d7d6 100644
          if self.escape is not None and t < self.escape_until:
              move = self.escape
          move = self._dodge(obs, move)
-@@ -147,7 +152,7 @@ class Bot:
+@@ -147,7 +156,7 @@ class Bot:
          # ---------------- aim + fire
          fire = [False, False]
          aim = None
@@ -51,7 +69,144 @@ index 4dd3ec0..965d7d6 100644
              aim = self._lead_aim(target)
              if fight or t - self.attackers.get(target["id"], -99) < 4:
                  fire = self._fire_control(target, aim, enemies, obs)
-@@ -789,6 +794,39 @@ class Bot:
+@@ -368,38 +377,56 @@ class Bot:
+ 
+     # ================================================================== aiming
+     def _lead_aim(self, e):
++        weapons = self._weapons()
++        _, gun = weapons.get("gun", (None, None))
++        _, laser = weapons.get("laser", (None, None))
++        _, mortar = weapons.get("mortar", (None, None))
++        if not self.target_los and mortar:
++            return self._mortar_aim(e, mortar)
++
++        self.direct_aim, _, _ = self._intercept(e, self.sim_step)
++        self.gun_solution = None
++        if gun and gun.get("ammo", 0) and not gun.get("reload", 0):
++            delay = self._launch_delay(gun)
++            self.gun_solution = self._intercept(e, delay, gun["stats"]["speed"])
++        if laser and laser.get("charge", 0) >= laser["stats"]["charge"] - self.decision_span:
++            return self.direct_aim
++        return self.gun_solution[0] if self.gun_solution else self.direct_aim
++
++    def _launch_delay(self, weapon):
++        tick = math.ceil((weapon["cooldown"] - 1e-8) / self.sim_step)
++        return max(1, tick) * self.sim_step
++
++    def _intercept(self, enemy, delay, speed=None):
+         x, y, z = self.pos
+-        mz = z + self.muzzle
+-        ex, ey, ez = e["pos"]
+-        vx, vy, vz = e.get("vel", (0, 0, 0))
+-        sc = 1 + 0.05 * e.get("cubes", 0)
+-        cz = ez + (4.5 * sc if e["kind"] == "mech" else 1.75)
+-        wk = self._weapons()
+-        speed = 252.0
+-        if "gun" in wk:
+-            speed = wk["gun"][1]["stats"].get("speed", 252.0)
+-        if not self.target_los and "mortar" in wk:
+-            return self._mortar_aim(e, wk["mortar"][1])
+-        if "gun" not in wk or wk["gun"][1].get("ammo", 1) == 0 or wk["gun"][1].get("reload", 0) > 0:
+-            speed = 1e9  # hitscan weapons: no lead
+-        if "laser" in wk:
+-            lw = wk["laser"][1]
+-            if (lw.get("charge") or 0) >= lw["stats"].get("charge", 0.75) * 0.5:
+-                speed = 1e9  # laser about to fire: aim straight at it
+-        tt = 0.0
+-        g = self.mech["gravity"]
+-        airborne = vz != 0
+-        for _ in range(3):
+-            px = ex + vx * tt
+-            py = ey + vy * tt
+-            pz = cz + vz * tt - (0.5 * g * tt * tt if airborne else 0)
+-            d = math.dist((px, py, pz), (x, y, mz))
+-            tt = min(1.2, d / speed)
+-        dx, dy = px - x, py - y
+-        yaw = math.atan2(dy, dx)
+-        pitch = math.atan2(pz - mz, math.hypot(dx, dy))
+-        self.aim_pred = (px, py, pz)
+-        return (yaw, pitch)
++        vx, vy, vz = self.me["vel"]
++        origin = (x + vx * delay, y + vy * delay, z + self.muzzle + vz * delay)
++        ex, ey, ez = enemy["pos"]
++        evx, evy, evz = enemy["vel"]
++        scale = 1 + self.cfg["cubes"]["size_per_cube"] * enemy.get("cubes", 0)
++        ez += self.mech["height"] * scale / 2
++        airborne = abs(evz) > 0.05
++        gravity = self.mech["gravity"] if airborne else 0
++        muzzle_offset = self.me["stats"]["radius"] + 0.5
++        travel = 0.0
++        for _ in range(3 if speed else 1):
++            # A shot starts past the barrel and crosses part of its path on the launch step.
++            time_to_hit = delay + max(0, travel - self.sim_step * 0.5)
++            point = (ex + evx * time_to_hit, ey + evy * time_to_hit,
++                     ez + evz * time_to_hit - gravity * time_to_hit ** 2 * 0.5)
++            if speed:
++                travel = max(0.0, math.dist(origin, point) - muzzle_offset) / speed
++        dx, dy, dz = (b - a for a, b in zip(origin, point))
++        return (math.atan2(dy, dx), math.atan2(dz, math.hypot(dx, dy))), origin, point
++
++    def _aim_at_launch(self, command, delay):
++        stats = self.me["stats"]
++        yaw, pitch = self.me["aim"]
++        dyaw = wrap(command[0] - yaw)
++        dpitch = max(stats["min_pitch"], min(stats["max_pitch"], command[1])) - pitch
++        turn = stats["turn_rate"] * delay
++        tilt = stats["pitch_rate"] * delay
++        return yaw + max(-turn, min(turn, dyaw)), pitch + max(-tilt, min(tilt, dpitch))
+ 
+     def _mortar_aim(self, e, w):
+         x, y, z = self.pos
+@@ -462,11 +489,11 @@ class Bot:
+         fire = [False, False]
+         me = self.me
+         d3 = math.dist(self.pos, e["pos"])
+-        sc = 1 + 0.05 * e.get("cubes", 0)
+-        rad = 2.5 * sc
++        sc = 1 + self.cfg["cubes"]["size_per_cube"] * e.get("cubes", 0)
++        rad = self.mech["radius"] * sc
+         eyaw, epitch = self._aim_err(aim)
+-        tol = math.atan2(rad * 0.85, max(1.0, d3)) + 0.004
+-        ptol = math.atan2(4.0 * sc, max(1.0, d3)) + 0.01
++        tol = math.atan2(rad * 0.8, max(1.0, d3))
++        ptol = math.atan2(self.mech["height"] * sc * 0.42, max(1.0, d3))
+         los = self.target_los
+         for i, w in enumerate(me["weapons"]):
+             if not w:
+@@ -474,13 +501,14 @@ class Bot:
+             k = w["kind"]
+             s = w.get("stats", {})
+             if k == "gun":
+-                tspeed = math.hypot(*e.get("vel", (0, 0, 0))[:2])
+-                max_d = 125.0 if tspeed > 4 else 190.0
+-                if t_attacked(self, e) and d3 < 160:
+-                    max_d = 160.0
+-                if los and d3 < min(max_d, s.get("range", 230) * 0.98) and w.get("ammo", 1) > 0 and w.get("reload", 0) == 0 \
+-                        and eyaw < tol and epitch < ptol:
+-                    fire[i] = True
++                delay = self._launch_delay(w)
++                if not los or self.gun_solution is None or delay > self.decision_span or d3 >= s["range"]:
++                    continue
++                shot, origin, point = self.gun_solution
++                yaw, pitch = self._aim_at_launch(aim, delay)
++                if abs(wrap(yaw - shot[0])) > tol or abs(pitch - shot[1]) > ptol:
++                    continue
++                fire[i] = self.nav is None or self.nav.los(origin, point)
+             elif k == "lightning":
+                 rng = s.get("range", 45)
+                 cone = math.radians(s.get("cone_deg", 30)) / 2
+@@ -499,7 +527,9 @@ class Bot:
+                 if charge > 0:
+                     # holding: release when aimed (beam is hitscan) or keep holding
+                     ready = charge >= full * 0.97
+-                    on = los and eyaw < tol * 0.9 and epitch < ptol
++                    yaw, pitch = self._aim_at_launch(aim, self.sim_step)
++                    on = (los and self.direct_aim is not None and d3 <= s["range"] and abs(wrap(yaw - self.direct_aim[0])) < tol
++                          and abs(pitch - self.direct_aim[1]) < ptol)
+                     fire[i] = not (ready and on) and charge < full + s.get("hold_s", 2) - 0.15
+                     if not los and charge >= full:
+                         fire[i] = True  # keep it charged while target is behind cover
+@@ -789,6 +819,39 @@ class Bot:
          return jump, jet
  
      # ================================================================== no enemy in sight
