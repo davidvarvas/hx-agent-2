@@ -1,3 +1,5 @@
-tools
-*.md
-.git
+*
+!Dockerfile
+!mechfight.py
+!nav.py
+!bot.py

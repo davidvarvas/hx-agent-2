@@ -139,6 +139,11 @@ class Bot:
         else:
             move, aim_point, label = self._peaceful(obs, npcs, zone_goal)
 
+        if label.startswith("fight "):
+            loot = self._combat_loot(obs, enemies)
+            if loot is not None:
+                move, label = loot
+
         if self.escape is not None and t < self.escape_until:
             move = self.escape
         move = self._dodge(obs, move)
@@ -147,7 +152,7 @@ class Bot:
         # ---------------- aim + fire
         fire = [False, False]
         aim = None
-        if target is not None:
+        if target is not None and (fight or aim_point is None):
             aim = self._lead_aim(target)
             if fight or t - self.attackers.get(target["id"], -99) < 4:
                 fire = self._fire_control(target, aim, enemies, obs)
@@ -789,6 +794,39 @@ class Bot:
         return jump, jet
 
     # ================================================================== no enemy in sight
+    def _combat_loot(self, obs, enemies):
+        """Collect accessible loot during a duel while keeping the torso on the fight."""
+        if self.hp_frac < 0.42:
+            return None
+        here = tuple(self.pos[:2])
+        weapons = self._weapons()
+        nearby = [enemy for enemy in enemies if enemy["d"] < 90 and self._has_los(enemy)]
+        if len(nearby) > 1:
+            return None
+        under_fire = self.t - self.last_dmg_t < 1.0
+        cube_cap = self.cfg["cubes"]["stat_cap"]
+        candidates = []
+        for label, items, limit, credit in (
+            ("combat cube", obs["cubes"], 20 if under_fire else 32, 15 if self.me["cubes"] < cube_cap else 5),
+            ("combat weapon", obs["pickups"], 28 if under_fire else 48, 25 if len(weapons) == 1 else 8),
+        ):
+            for item in items:
+                if label == "combat weapon" and not self._want_weapon(item["kind"], weapons):
+                    continue
+                point = item["pos"]
+                xy = tuple(point[:2])
+                distance = math.dist(here, xy)
+                if abs(point[2] - self.pos[2]) > 4 or distance > limit or not self._in_zone_later(obs, xy):
+                    continue
+                if any(math.dist(enemy["pos"][:2], xy) < min(enemy["d"] * 0.8, distance + 14)
+                       for enemy in nearby):
+                    continue
+                candidates.append((distance - credit, item["id"], xy, label))
+        for _, _, xy, label in sorted(candidates)[:3]:
+            if self.nav is None or self.nav.walk_clear(here, xy):
+                return norm2(xy[0] - here[0], xy[1] - here[1]), label
+        return None
+
     def _peaceful(self, obs, npcs, zone_goal):
         x, y, z = self.pos
         t = self.t

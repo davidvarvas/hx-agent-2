@@ -7,7 +7,8 @@ def one(s):
     r = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "sim.py"), "--seed", str(s), "--"] + cmd, capture_output=True, text=True)
     try: return json.loads(r.stdout.strip().splitlines()[-1])
     except Exception: return {"error": r.stderr[-500:]}
-with ThreadPoolExecutor(int(os.environ.get("J", "8"))) as ex:
+jobs = max(1, min(2, int(os.environ.get("J", "2"))))
+with ThreadPoolExecutor(jobs) as ex:
     res = list(ex.map(one, range(start, start + n)))
 for r in res: print(r)
 ok = [r for r in res if "points" in r]
