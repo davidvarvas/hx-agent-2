@@ -380,7 +380,11 @@ class Bot:
             enemy["rear_angle"] = facing_error
 
     def _choose_target(self, enemies):
+        if not enemies:
+            return None
+        reach = max((w["stats"].get("range", 0) for w in self.me["weapons"] if w), default=0)
         best, best_score = None, math.inf
+        clear_threat, threat_score = None, math.inf
         for enemy in enemies:
             if enemy["d"] > self.W["laser"]["range"]:
                 continue
@@ -390,6 +394,10 @@ class Bot:
             score -= 0.25 if enemy["rear_angle"] > math.radians(self.mech["front_arc_deg"]) / 2 else 0.0
             if score < best_score:
                 best, best_score = enemy, score
+            if enemy["clear"] and enemy["aggressor"] and enemy["d"] <= reach and score < threat_score:
+                clear_threat, threat_score = enemy, score
+        if best is not None and not best["clear"] and clear_threat is not None:
+            return clear_threat
         return best
 
     def _should_fight(self, target, obs):
