@@ -1,4 +1,4 @@
-"""Survivor: a mechfight/1 bot that plays for placement.
+"""Survivor: a bot that plays to stay alive.
 
 Priorities, in order: stay in the zone, never show its back, fight with lead-aimed fire while strafing,
 break line of sight and regenerate when losing, and farm cubes/weapons/drops when nobody is around.
@@ -8,7 +8,7 @@ import math
 import random
 import time
 
-import mechfight as mf
+import wire as mf
 
 try:
     import nav

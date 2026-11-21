@@ -1,6 +1,6 @@
-"""Minimal mechfight/1 runtime: stdin/stdout loop, newest-observation rule, debug drawing, logging.
+"""Minimal runtime: stdin/stdout loop, newest-observation rule, debug drawing, logging.
 
-    import mechfight as mf
+    import wire as mf
     class Bot:
         def __init__(self, hello): ...
         def act(self, obs): return {"tick": obs["tick"], ...}
