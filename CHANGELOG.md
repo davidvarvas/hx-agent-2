@@ -10,5 +10,6 @@ Local practice tests use the kit map, 24 matched seeds (200–223), `NOISE=0.6`,
 | Predict intercepts and turret aim for the firing tick | 5.96 | Kept. No late actions in the 24-match batch. Official Docker check passed ([run](https://github.com/davidvarvas/mech-royale-bot-gpt/actions/runs/44842802350)). |
 | Read weapon, movement, and hitbox values from live rules | 5.96 | Kept. Same score with the kit balance. Official Docker check passed ([run](https://github.com/davidvarvas/mech-royale-bot-gpt/actions/runs/44843004781)). |
 | Target direct threats and favor advantageous fights | 6.92 | Kept. A separate 24-seed free-for-all model improved from 12.00 to 12.58. Official Docker check passed ([run](https://github.com/davidvarvas/mech-royale-bot-gpt/actions/runs/44843441253)). |
+| Bound pathfinding work per decision | 6.67 | Kept for timing. The 24-match run had zero late actions, down from four, and a 25 ms observed maximum on the shared Mac. Official Docker check passed ([run](https://github.com/davidvarvas/mech-royale-bot-gpt/actions/runs/44843749860)). |
 
 The combat-loot build pins the Python image and NumPy. Local batch runs cap concurrency at two.

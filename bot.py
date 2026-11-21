@@ -47,6 +47,7 @@ class Bot:
         self.cube_growth = cfg["cubes"]["size_per_cube"]
         self.sim_step = 1 / cfg["match"]["tick_hz"]
         self.decision_span = self.sim_step * cfg["match"]["decide_every"]
+        self.search_budget = min(0.012, cfg["bot"]["tick_budget_ms"] * 0.00024)
         self.reach = cfg["loot"]["pickup_radius"]
         self.nav = None
         if nav is not None:
@@ -647,7 +648,7 @@ class Bot:
         need = (self.path is None or self.path_goal is None or math.dist(self.path_goal, goal) > 15
                 or self.t - self.path_t > 4.0) and self.t - self.path_t > 0.8
         if need and self._heavy_ok():
-            self.path = n.astar((x, y), (gx, gy), max_expand=3000)
+            self.path = n.astar((x, y), (gx, gy), deadline=self.t0 + self.search_budget)
             self.path_goal = goal
             self.path_t = self.t
             self.heavy_used = True
@@ -659,7 +660,7 @@ class Bot:
         return norm2(gx - x, gy - y)
 
     def _heavy_ok(self):
-        return not self.heavy_used and (time.perf_counter() - self.t0) < 0.012
+        return not self.heavy_used and (time.perf_counter() - self.t0) < self.search_budget
 
     def _steer_free(self, mx, my, probe=7.0):
         """Rotate a desired move away from walls (ground grid)."""
