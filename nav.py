@@ -7,6 +7,7 @@ import heapq
 import json
 import math
 import os
+import time
 
 import numpy as np
 
@@ -15,7 +16,10 @@ NEG = -1e4
 
 
 class NavMap:
-    def __init__(self, map_dir, mech_height=9.0, step_up=1.2):
+    def __init__(self, map_dir, mech):
+        mech_height = mech["height"]
+        step_up = mech["step_up"]
+        required_clearance = math.ceil(mech["radius"] / CELL)
         with open(os.path.join(map_dir, "v2", "world.json")) as f:
             w = json.load(f)
         t = w["terrain"]
@@ -56,7 +60,7 @@ class NavMap:
         dzx = np.abs(np.diff(g, axis=1))
         dzy = np.abs(np.diff(g, axis=0))
         steep = np.zeros_like(solid)
-        lim = CELL * math.tan(math.radians(50)) * 0.95
+        lim = CELL * math.tan(math.radians(mech["max_slope_deg"])) * 0.95
         steep[:, 1:] |= dzx > lim
         steep[:, :-1] |= dzx > lim
         steep[1:, :] |= dzy > lim
@@ -67,8 +71,8 @@ class NavMap:
         # height of whatever is solid in the cell (for LOS against roofs, and for "standing on a roof")
         self.solid_top = np.where(self.top > g, self.top, g)
         self.clear = self._clearance(blocked)  # distance to nearest blocked cell, in cells
-        self.free_flat = (self.clear >= 2).ravel().tolist()      # comfortable for a 2.5 m radius
-        self.free_tight = (self.clear >= 1).ravel().tolist()
+        self.free_flat = (self.clear >= required_clearance).ravel().tolist()
+        self.free_tight = (self.clear >= max(1, required_clearance - 1)).ravel().tolist()
         self.cost_flat = np.where(self.clear >= 4, 1.0, np.where(self.clear >= 3, 1.3, 2.0)).ravel().tolist()
         # coarse 4 m grid for path search: a coarse cell is free if any of its 2x2 fine cells is comfortable
         cny, cnx = ny // 2, nx // 2
@@ -76,7 +80,7 @@ class NavMap:
         c = blk.max(axis=(1, 3))
         cmin = blk.min(axis=(1, 3))
         self.cnx, self.cny = cnx, cny
-        self.cfree = ((c >= 2) & (cmin >= 1)).ravel().tolist()
+        self.cfree = ((c >= required_clearance) & (cmin >= 1)).ravel().tolist()
         self.ccost = np.where(c >= 5, 1.0, np.where(c >= 3, 1.25, 1.8)).ravel().tolist()
 
     # ------------------------------------------------------------------ build helpers
@@ -216,7 +220,7 @@ class NavMap:
                 return best[1], best[2]
         return None
 
-    def astar(self, start, goal, max_expand=3000, weight=1.5):
+    def astar(self, start, goal, max_expand=3000, weight=1.5, deadline=math.inf):
         """Weighted A* on the 4 m coarse grid between world points. Returns world (x, y) waypoints
         (string-pulled on the fine grid), or a partial path toward the goal, or None."""
         s = self._cnear(*start)
@@ -234,7 +238,7 @@ class NavMap:
         center = lambda c: (self.minx + (c % nx + 0.5) * cs, self.miny + (c // nx + 0.5) * cs)
         if si == gi:
             return [tuple(goal)]
-        openh = [(0.0, si)]
+        openh = [(0.0, si, 0.0)]
         gs = {si: 0.0}
         came = {}
         nbrs = ((1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
@@ -244,13 +248,16 @@ class NavMap:
         push = heapq.heappush
         pop = heapq.heappop
         while openh and exp < max_expand:
-            f, cur = pop(openh)
+            if exp % 32 == 0 and time.perf_counter() >= deadline:
+                break
+            _, cur, gc = pop(openh)
+            if gc != gs[cur]:
+                continue
             if cur == gi:
                 best = (0, cur)
                 break
             exp += 1
             cj, ci = divmod(cur, nx)
-            gc = gs[cur]
             hcur = abs(ci - gx) + abs(cj - gy)
             if hcur < best[0]:
                 best = (hcur, cur)
@@ -271,7 +278,7 @@ class NavMap:
                     adx = abs(ii - gx)
                     ady = abs(jj - gy)
                     h = (adx + ady) - 0.5858 * (adx if adx < ady else ady)
-                    push(openh, (ng + weight * h, n))
+                    push(openh, (ng + weight * h, n, ng))
         end = best[1]
         cells = [end]
         while cells[-1] in came:
@@ -280,14 +287,17 @@ class NavMap:
         pts = [center(c) for c in cells]
         if end == gi:
             pts[-1] = tuple(goal)
-        return self._smooth(pts)
+        return self._smooth(pts, deadline)
 
-    def _smooth(self, pts):
+    def _smooth(self, pts, deadline):
         if len(pts) <= 2:
             return pts[1:] or pts
         out = []
         k = 0
         while k < len(pts) - 1:
+            if time.perf_counter() >= deadline:
+                out.extend(pts[k + 1:])
+                break
             far = k + 1
             # jump as far ahead as a straight walk stays on free cells
             hi = min(len(pts) - 1, k + 40)
