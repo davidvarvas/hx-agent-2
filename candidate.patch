@@ -27,7 +27,7 @@ index e977884..0336ed1 100644
  COPY mechfight.py nav.py bot.py ./
  RUN python3 -m compileall -q /bot
 diff --git a/bot.py b/bot.py
-index 4dd3ec0..cfb31b2 100644
+index 4dd3ec0..34002a9 100644
 --- a/bot.py
 +++ b/bot.py
 @@ -44,11 +44,15 @@ class Bot:
@@ -47,17 +47,16 @@ index 4dd3ec0..cfb31b2 100644
              except Exception as e:  # keep playing without the map
                  mf.log("map load failed:", repr(e))
          self.t = 0.0
-@@ -85,6 +89,9 @@ class Bot:
+@@ -85,6 +89,8 @@ class Bot:
          self.t0 = t0
          self.heavy_used = False
          self.mortar_sol = None
-+        self.mortar_support_fire = False
 +        self.gun_solution = None
 +        self.direct_aim = None
          self.want_jump = False
          self.farm_kind = None
          t = self.t = obs["t"]
-@@ -92,8 +99,7 @@ class Bot:
+@@ -92,8 +98,7 @@ class Bot:
          x, y, z = self.pos = me["pos"]
          self.hp_frac = me["hp"] / max(1.0, me["max_hp"])
          st = me["stats"]
@@ -67,7 +66,7 @@ index 4dd3ec0..cfb31b2 100644
          act = {"tick": obs["tick"]}
          self._events(obs)
          if obs.get("offer"):
-@@ -111,9 +117,10 @@ class Bot:
+@@ -111,9 +116,10 @@ class Bot:
          enemies.sort(key=lambda e: e["d"])
  
          zone_goal, zone_urgent = self._zone_goal(obs)
@@ -80,7 +79,7 @@ index 4dd3ec0..cfb31b2 100644
  
          move = (0.0, 0.0)
          boost = False
-@@ -122,41 +129,53 @@ class Bot:
+@@ -122,41 +128,53 @@ class Bot:
  
          # ---------------- movement decision
          retreat = target is not None and self._should_retreat(target, enemies)
@@ -129,10 +128,9 @@ index 4dd3ec0..cfb31b2 100644
          fire = [False, False]
          aim = None
 -        if target is not None:
--            aim = self._lead_aim(target)
--            if fight or t - self.attackers.get(target["id"], -99) < 4:
 +        if fight or (target is not None and label in ("cover", "to cover", "kite")):
-+            aim = self._lead_aim(target, support_mortar=fight)
+             aim = self._lead_aim(target)
+-            if fight or t - self.attackers.get(target["id"], -99) < 4:
 +            if fight:
                  fire = self._fire_control(target, aim, enemies, obs)
          if aim is None and aim_point is not None:
@@ -145,7 +143,7 @@ index 4dd3ec0..cfb31b2 100644
  
          # laser charge needs fire held across ticks; lightning/gun fire are one-shot holds
          act["fire"] = fire
-@@ -177,7 +196,8 @@ class Bot:
+@@ -177,7 +195,8 @@ class Bot:
              act.update(tk)
  
          mvx, mvy = move
@@ -155,7 +153,7 @@ index 4dd3ec0..cfb31b2 100644
          act["boost"] = bool(boost)
          if DEBUG and obs["tick"] % 10 == 0:
              g = self._weapons().get("gun")
-@@ -251,7 +271,7 @@ class Bot:
+@@ -251,7 +270,7 @@ class Bot:
          x, y = self.pos[0], self.pos[1]
          t = self.t
          nc, nr = z["next_center"], z["next_radius"]
@@ -164,7 +162,7 @@ index 4dd3ec0..cfb31b2 100644
          margin = max(6.0, min(30.0, nr * 0.25))
          dn = math.dist((x, y), nc)
          target_r = max(0.0, nr - margin)
-@@ -278,6 +298,29 @@ class Bot:
+@@ -278,6 +297,29 @@ class Bot:
          self.zone_goal = goal
          return goal, urgent
  
@@ -194,7 +192,7 @@ index 4dd3ec0..cfb31b2 100644
      def _outside_soon(self, obs):
          z = obs["zone"]
          cc, cr = self._zone_circle_at(z, self.t + 4.0)
-@@ -313,38 +356,64 @@ class Bot:
+@@ -313,38 +355,64 @@ class Bot:
          return mx, my
  
      # ================================================================== targets
@@ -282,7 +280,7 @@ index 4dd3ec0..cfb31b2 100644
          close = [e for e in enemies if e["d"] < 120]
          if self.hp_frac < 0.3 and th > my * 0.8:
              return True
-@@ -355,59 +424,157 @@ class Bot:
+@@ -355,59 +423,86 @@ class Bot:
          return False
  
      def _outnumbered(self, enemies):
@@ -308,21 +306,13 @@ index 4dd3ec0..cfb31b2 100644
 +        return self.nav.los((x, y, z + self.muzzle), (ex, ey, center))
  
      # ================================================================== aiming
--    def _lead_aim(self, e):
-+    def _lead_aim(self, e, support_mortar=False):
+     def _lead_aim(self, e):
 +        weapons = self._weapons()
 +        _, gun = weapons.get("gun", (None, None))
 +        _, laser = weapons.get("laser", (None, None))
 +        _, mortar = weapons.get("mortar", (None, None))
 +        if not self.target_los and mortar:
 +            return self._mortar_aim(e, mortar)
-+        if support_mortar and mortar and gun and (
-+            not gun.get("ammo", 0) or gun.get("reload", 0) > 0.35
-+        ):
-+            support = self._mortar_support(e, mortar)
-+            if support is not None:
-+                aim, self.mortar_support_fire = support
-+                return aim
 +
 +        self.direct_aim, _, _ = self._intercept(e, self.sim_step)
 +        self.gun_solution = None
@@ -401,70 +391,6 @@ index 4dd3ec0..cfb31b2 100644
 +            turn *= laser[1]["stats"]["charge_turn_mult"]
 +        tilt = stats["pitch_rate"] * delay
 +        return yaw + max(-turn, min(turn, dyaw)), pitch + max(-tilt, min(tilt, dpitch))
-+
-+    def _mortar_support(self, enemy, mortar):
-+        """Find a short open shot during a gun reload."""
-+        shot = mortar["stats"]
-+        delay = self._launch_delay(mortar)
-+        splash = shot["splash_radius"]
-+        if delay > self.decision_span or enemy["d"] < 3 * splash or self.nav is None:
-+            return None
-+
-+        horizon = min(1.5, shot["ttl"])
-+        speed = shot["speed"]
-+        gravity = shot["gravity"]
-+        stats = self.me["stats"]
-+        x, y, z = self.pos
-+        vx, vy, vz = self.me["vel"]
-+        tube = (x + vx * delay, y + vy * delay, z + vz * delay + stats["height"] + 0.5)
-+        barrel = stats["radius"] + 0.5
-+        ex, ey, ez = enemy["pos"]
-+        evx, evy, evz = enemy["vel"]
-+        scale = self._size(enemy)
-+        height = self.mech["height"] * scale
-+
-+        def required_vector(flight):
-+            arrival = delay + flight
-+            return (ex + evx * arrival - tube[0], ey + evy * arrival - tube[1],
-+                    ez + height / 2 + evz * arrival - tube[2] + gravity * flight ** 2 / 2)
-+
-+        # The first root gives the short trajectory. The shell starts past the tube,
-+        # so the distance traveled along the aim includes both barrel length and flight.
-+        if math.hypot(*required_vector(horizon)) > barrel + speed * horizon:
-+            return None
-+        low, high = 0.0, horizon
-+        for _ in range(10):
-+            flight = (low + high) / 2
-+            if math.hypot(*required_vector(flight)) > barrel + speed * flight:
-+                low = flight
-+            else:
-+                high = flight
-+        flight = (low + high) / 2
-+        dx, dy, dz = required_vector(flight)
-+        if math.hypot(dx - vx * flight, dy - vy * flight) < 2 * splash:
-+            return None
-+        aim = math.atan2(dy, dx), math.atan2(dz, math.hypot(dx, dy))
-+        if not stats["min_pitch"] <= aim[1] <= stats["max_pitch"]:
-+            return None
-+
-+        yaw, pitch = self._aim_at_launch(aim, delay)
-+        direction = (math.cos(pitch) * math.cos(yaw), math.cos(pitch) * math.sin(yaw), math.sin(pitch))
-+        distance = barrel + speed * flight
-+        radius = self.mech["radius"] * scale
-+        miss = math.hypot(distance * direction[0] - dx, distance * direction[1] - dy)
-+        if miss > radius * 0.75 or abs(distance * direction[2] - dz) > height * 0.35:
-+            return aim, False
-+
-+        steps = max(1, math.ceil(flight / 0.20))
-+        points = [tube]
-+        for step in range(steps + 1):
-+            elapsed = flight * step / steps
-+            reach = barrel + speed * elapsed
-+            points.append((tube[0] + reach * direction[0], tube[1] + reach * direction[1],
-+                           tube[2] + reach * direction[2] - gravity * elapsed ** 2 / 2))
-+        if not self.nav.los_many(points[:-1], points[1:], step=1.0).all():
-+            return None
-+        return aim, True
  
      def _mortar_aim(self, e, w):
          x, y, z = self.pos
@@ -479,7 +405,7 @@ index 4dd3ec0..cfb31b2 100644
          tt = 0.0
          sol = None
          for _ in range(3):
-@@ -418,11 +585,10 @@ class Bot:
+@@ -418,11 +513,10 @@ class Bot:
              if disc < 0 or d < 1:
                  break
              th = math.atan((v * v + math.sqrt(disc)) / (g * d))  # high arc: clears buildings
@@ -492,7 +418,7 @@ index 4dd3ec0..cfb31b2 100644
          self.mortar_sol = sol
          if sol is None:
              return (math.atan2(ey - y, ex - x), 0.0)
-@@ -462,29 +628,30 @@ class Bot:
+@@ -462,29 +556,30 @@ class Bot:
          fire = [False, False]
          me = self.me
          d3 = math.dist(self.pos, e["pos"])
@@ -538,7 +464,7 @@ index 4dd3ec0..cfb31b2 100644
                  if me["energy"] > cost + 8:
                      for o in enemies:
                          if o["d"] < rng * 0.95:
-@@ -494,39 +661,45 @@ class Bot:
+@@ -494,39 +589,43 @@ class Bot:
                                  break
              elif k == "laser":
                  charge = w.get("charge", 0) or 0
@@ -566,9 +492,7 @@ index 4dd3ec0..cfb31b2 100644
                  sol = getattr(self, "mortar_sol", None)
 -                if w.get("cooldown", 0) <= 0 and 22 < d3 < 230 and sol is not None and not los and \
 -                        eyaw < 0.03 and epitch < 0.03 and self._mortar_path_ok(sol):
-+                if self.mortar_support_fire:
-+                    fire[i] = True
-+                elif w.get("cooldown", 0) <= 0 and d3 > 3 * s["splash_radius"] and sol is not None and not los and \
++                if w.get("cooldown", 0) <= 0 and d3 > 3 * s["splash_radius"] and sol is not None and not los and \
 +                        eyaw < 0.03 and epitch < 0.03 and self._mortar_path_ok(sol, s):
                      fire[i] = True
                  elif w.get("cooldown", 0) <= 0 and los and 25 < d3 < 140 and "gun" not in self._weapons():
@@ -595,7 +519,7 @@ index 4dd3ec0..cfb31b2 100644
          A = [(x, y, mz)] + pts[:-1]
          return bool(self.nav.los_many(A, pts).all())
  
-@@ -537,7 +710,7 @@ class Bot:
+@@ -537,7 +636,7 @@ class Bot:
          fire = [False, False]
          d = math.dist(self.pos, p)
          eyaw, epitch = self._aim_err(aim)
@@ -604,7 +528,7 @@ index 4dd3ec0..cfb31b2 100644
          tol = math.atan2(rad * 0.8, max(1.0, d)) + 0.004
          x, y, z = self.pos
          if self.nav is not None and not self.nav.los((x, y, z + self.muzzle), p):
-@@ -545,9 +718,9 @@ class Bot:
+@@ -545,9 +644,9 @@ class Bot:
          for i, w in enumerate(self.me["weapons"]):
              if not w:
                  continue
@@ -616,7 +540,7 @@ index 4dd3ec0..cfb31b2 100644
                  fire[i] = True
          return fire
  
-@@ -559,7 +732,7 @@ class Bot:
+@@ -559,7 +658,7 @@ class Bot:
          if w.get("reload", 0) > 0:
              return
          ammo = w.get("ammo", 0)
@@ -625,7 +549,7 @@ index 4dd3ec0..cfb31b2 100644
          if ammo == 0 or (ammo < mag * 0.5 and (target is None or not self.target_los) and self.t - self.last_dmg_t > 1.5):
              act["reload"] = True
              act["fire"][i] = False
-@@ -580,7 +753,7 @@ class Bot:
+@@ -580,7 +679,7 @@ class Bot:
          need = (self.path is None or self.path_goal is None or math.dist(self.path_goal, goal) > 15
                  or self.t - self.path_t > 4.0) and self.t - self.path_t > 0.8
          if need and self._heavy_ok():
@@ -634,7 +558,7 @@ index 4dd3ec0..cfb31b2 100644
              self.path_goal = goal
              self.path_t = self.t
              self.heavy_used = True
-@@ -592,7 +765,7 @@ class Bot:
+@@ -592,7 +691,7 @@ class Bot:
          return norm2(gx - x, gy - y)
  
      def _heavy_ok(self):
@@ -643,16 +567,28 @@ index 4dd3ec0..cfb31b2 100644
  
      def _steer_free(self, mx, my, probe=7.0):
          """Rotate a desired move away from walls (ground grid)."""
-@@ -626,7 +799,7 @@ class Bot:
+@@ -618,16 +717,18 @@ class Bot:
+         ex, ey = tgt["pos"][0], tgt["pos"][1]
+         d = tgt["d"]
+         their = tgt.get("weapons") or []
++        finish = self._enemy_health(tgt) < 0.25 and self.hp_frac > 0.4
+         if "lightning" in wk and self.me["energy"] > 25:
+             want = 26.0
+         elif "lightning" in their:
+             want = 75.0
+         elif "laser" in wk and "gun" not in wk:
              want = 110.0
++        elif "gun" in wk and not finish:
++            want = wk["gun"][1]["stats"]["range"] * 0.48
          else:
              want = 60.0
 -        hpf_t = tgt["hp"] / max(1.0, tgt.get("max_hp", 1400))
-+        hpf_t = self._enemy_health(tgt)
-         if hpf_t < 0.25 and self.hp_frac > 0.4:
+-        if hpf_t < 0.25 and self.hp_frac > 0.4:
++        if finish:
              want *= 0.7
          ux, uy = norm2(ex - x, ey - y)
-@@ -700,8 +873,8 @@ class Bot:
+         radial = max(-1.0, min(1.0, (d - want) / max(15.0, want * 0.5)))
+@@ -700,8 +801,8 @@ class Bot:
              gz = n.ground_at(px, py) if (px, py) != (x, y) else z
              for e in threats:
                  ex, ey, ez = e["pos"]
@@ -663,7 +599,7 @@ index 4dd3ec0..cfb31b2 100644
          vis = n.los_many(np.array(A, np.float32), np.array(B, np.float32), step=2.0)
          k = len(threats)
          best, bs = None, 1e9
-@@ -730,7 +903,8 @@ class Bot:
+@@ -730,7 +831,8 @@ class Bot:
          """Step away from incoming mortar shells' landing points and laser lines aimed at us."""
          x, y, z = self.pos
          mx, my = move
@@ -673,7 +609,7 @@ index 4dd3ec0..cfb31b2 100644
          for p in obs.get("projectiles") or []:
              if p["kind"] != "mortar":
                  continue
-@@ -746,7 +920,7 @@ class Bot:
+@@ -746,7 +848,7 @@ class Bot:
                  continue
              lx, ly = px + vx * tt, py + vy * tt
              dd = math.hypot(lx - x, ly - y)
@@ -682,7 +618,7 @@ index 4dd3ec0..cfb31b2 100644
                  ax, ay = norm2(x - lx, y - ly) if dd > 0.5 else (math.cos(self.t), math.sin(self.t))
                  mx += ax * 2.0
                  my += ay * 2.0
-@@ -789,6 +963,102 @@ class Bot:
+@@ -789,6 +891,102 @@ class Bot:
          return jump, jet
  
      # ================================================================== no enemy in sight
@@ -785,7 +721,7 @@ index 4dd3ec0..cfb31b2 100644
      def _peaceful(self, obs, npcs, zone_goal):
          x, y, z = self.pos
          t = self.t
-@@ -798,15 +1068,6 @@ class Bot:
+@@ -798,15 +996,6 @@ class Bot:
          ok = lambda p: self._in_zone_later(obs, p, 10.0, 10.0)
          hurt = self.hp_frac < 0.65
  
@@ -801,7 +737,7 @@ index 4dd3ec0..cfb31b2 100644
          if hurt:
              return self._heal(obs, zone_goal)
  
-@@ -855,12 +1116,12 @@ class Bot:
+@@ -855,12 +1044,12 @@ class Bot:
          if best:
              dd, cp = best
              self.farm_kind = "crate"
@@ -816,7 +752,7 @@ index 4dd3ec0..cfb31b2 100644
              best = None
              for nn in npcs:
                  dd = math.dist((x, y), nn["pos"][:2])
-@@ -870,7 +1131,9 @@ class Bot:
+@@ -870,7 +1059,9 @@ class Bot:
                  dd, nn = best
                  self.farm_kind = "npc"
                  p = nn["pos"]
@@ -827,7 +763,7 @@ index 4dd3ec0..cfb31b2 100644
                  if dd > 85:
                      mv = self._navigate(p[:2])
                  elif dd < 55:
-@@ -919,7 +1182,8 @@ class Bot:
+@@ -919,7 +1110,8 @@ class Bot:
          d = math.dist((x, y), nc)
          if d > max(3.0, nr * 0.35):
              mx, my = self._navigate(nc)
@@ -837,7 +773,7 @@ index 4dd3ec0..cfb31b2 100644
          return (0.0, 0.0)
  
      def _ground(self, p):
-@@ -961,12 +1225,4 @@ class Bot:
+@@ -961,12 +1153,4 @@ class Bot:
          return None
  
  
