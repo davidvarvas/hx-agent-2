@@ -27,7 +27,7 @@ index e977884..0336ed1 100644
  COPY mechfight.py nav.py bot.py ./
  RUN python3 -m compileall -q /bot
 diff --git a/bot.py b/bot.py
-index 4dd3ec0..a1d7e73 100644
+index 4dd3ec0..e8bbc11 100644
 --- a/bot.py
 +++ b/bot.py
 @@ -44,11 +44,14 @@ class Bot:
@@ -65,7 +65,32 @@ index 4dd3ec0..a1d7e73 100644
          act = {"tick": obs["tick"]}
          self._events(obs)
          if obs.get("offer"):
-@@ -139,6 +143,11 @@ class Bot:
+@@ -111,9 +115,10 @@ class Bot:
+         enemies.sort(key=lambda e: e["d"])
+ 
+         zone_goal, zone_urgent = self._zone_goal(obs)
++        self._measure_threats(enemies)
+         target = self._choose_target(enemies)
+-        fight = target is not None and self._should_fight(target, enemies)
+-        self.target_los = target is not None and self._has_los(target)
++        self.target_los = target is not None and target["clear"]
++        fight = target is not None and self._should_fight(target, obs)
+ 
+         move = (0.0, 0.0)
+         boost = False
+@@ -129,16 +134,21 @@ class Bot:
+         elif retreat and not (target["d"] < 38 or t - self.last_dmg_t < 0.6 and self.target_los):
+             move, label = self._retreat(enemies, zone_goal, obs)
+             boost = me["energy"] > 30 and t - self.last_dmg_t < 1.5
+-        elif target is not None and (fight or target["d"] < 70) and self._outnumbered(enemies):
++        elif fight and self._outnumbered(enemies):
+             move, label = self._retreat(enemies, zone_goal, obs, fight_target=target)
+             boost = me["energy"] > 45 and t - self.last_dmg_t < 1.0
+-        elif target is not None and (fight or target["d"] < 70):
++        elif fight:
+             move = self._fight_move(target, enemies, zone_goal, obs)
+             boost = me["energy"] > 45 and t - self.last_dmg_t < 1.0
+             label = f"fight {target['id']}"
          else:
              move, aim_point, label = self._peaceful(obs, npcs, zone_goal)
  
@@ -77,16 +102,18 @@ index 4dd3ec0..a1d7e73 100644
          if self.escape is not None and t < self.escape_until:
              move = self.escape
          move = self._dodge(obs, move)
-@@ -147,7 +156,7 @@ class Bot:
+@@ -147,16 +157,16 @@ class Bot:
          # ---------------- aim + fire
          fire = [False, False]
          aim = None
 -        if target is not None:
-+        if target is not None and (fight or aim_point is None):
++        if fight or (target is not None and label in ("cover", "to cover", "kite")):
              aim = self._lead_aim(target)
-             if fight or t - self.attackers.get(target["id"], -99) < 4:
+-            if fight or t - self.attackers.get(target["id"], -99) < 4:
++            if fight:
                  fire = self._fire_control(target, aim, enemies, obs)
-@@ -156,7 +165,7 @@ class Bot:
+         if aim is None and aim_point is not None:
+             aim = self._aim_at_point(aim_point)
              fire = self._fire_at_object(aim, aim_point, obs)
          if aim is None:
              aim = self._idle_aim(obs, move)
@@ -95,7 +122,7 @@ index 4dd3ec0..a1d7e73 100644
  
          # laser charge needs fire held across ticks; lightning/gun fire are one-shot holds
          act["fire"] = fire
-@@ -251,7 +260,7 @@ class Bot:
+@@ -251,7 +261,7 @@ class Bot:
          x, y = self.pos[0], self.pos[1]
          t = self.t
          nc, nr = z["next_center"], z["next_radius"]
@@ -104,25 +131,86 @@ index 4dd3ec0..a1d7e73 100644
          margin = max(6.0, min(30.0, nr * 0.25))
          dn = math.dist((x, y), nc)
          target_r = max(0.0, nr - margin)
-@@ -319,7 +328,7 @@ class Bot:
-         for e in enemies:
-             if e["d"] > 260:
+@@ -313,38 +323,64 @@ class Bot:
+         return mx, my
+ 
+     # ================================================================== targets
++    def _measure_threats(self, enemies):
++        if not enemies:
++            return
++        x, y, z = self.pos
++        source = [(x, y, z + self.muzzle)] * len(enemies)
++        target = [(ex, ey, ez + self.mech["height"] * self._size(enemy) / 2)
++                  for enemy in enemies for ex, ey, ez in (enemy["pos"],)]
++        exposed = self.nav.los_many(source, target) if self.nav else [True] * len(enemies)
++        since_attack = self.me["stats"]["regen_delay"] * 1.5
++        for enemy, clear in zip(enemies, exposed):
++            ex, ey, _ = enemy["pos"]
++            distance = max(1, enemy["d"])
++            dx, dy = x - ex, y - ey
++            facing_error = abs(wrap(math.atan2(dy, dx) - enemy["aim"][0]))
++            evx, evy, _ = enemy["vel"]
++            closing_speed = (evx * dx + evy * dy) / distance
++            close = distance < self.cfg["vision"]["near_range"]
++            aiming_here = facing_error < math.atan2(self.mech["radius"] * 3, distance) + 0.12
++            moving_here = close and facing_error < 0.75 and closing_speed > self.mech["walk_speed"] * 0.3
++            enemy["clear"] = bool(clear)
++            enemy["aggressor"] = (self.t - self.attackers.get(enemy["id"], -math.inf) < since_attack
++                                  or (clear and (aiming_here or moving_here)))
++            enemy["rear_angle"] = facing_error
++
+     def _choose_target(self, enemies):
+-        best, bs = None, 1e9
+-        t = self.t
+-        for e in enemies:
+-            if e["d"] > 260:
++        best, best_score = None, math.inf
++        for enemy in enemies:
++            if enemy["d"] > self.W["laser"]["range"]:
                  continue
 -            hpf = e["hp"] / max(1.0, e.get("max_hp", 1400))
-+            hpf = self._enemy_health(e)
-             s = e["d"] / 90.0 + hpf * 1.6
-             if t - self.attackers.get(e["id"], -99) < 3:
-                 s -= 1.0
-@@ -333,7 +342,7 @@ class Bot:
-         t = self.t
-         if t - self.attackers.get(tgt["id"], -99) < 6:
-             return True
+-            s = e["d"] / 90.0 + hpf * 1.6
+-            if t - self.attackers.get(e["id"], -99) < 3:
+-                s -= 1.0
+-            if e.get("charging"):
+-                s -= 0.4
+-            if s < bs:
+-                best, bs = e, s
++            score = enemy["d"] / 90 + 1.6 * self._enemy_health(enemy)
++            score += 0.7 if not enemy["clear"] else 0.0
++            score -= 1.1 if enemy["aggressor"] else 0.0
++            score -= 0.25 if enemy["rear_angle"] > math.radians(self.mech["front_arc_deg"]) / 2 else 0.0
++            if score < best_score:
++                best, best_score = enemy, score
+         return best
+ 
+-    def _should_fight(self, tgt, enemies):
+-        t = self.t
+-        if t - self.attackers.get(tgt["id"], -99) < 6:
+-            return True
 -        hpf = tgt["hp"] / max(1.0, tgt.get("max_hp", 1400))
-+        hpf = self._enemy_health(tgt)
-         if tgt["d"] < 110:
+-        if tgt["d"] < 110:
++    def _should_fight(self, target, obs):
++        if target["aggressor"]:
              return True
-         if hpf < 0.45 and tgt["d"] < 200:
-@@ -344,7 +353,7 @@ class Bot:
+-        if hpf < 0.45 and tgt["d"] < 200:
+-            return True
+-        if self.hp_frac > 0.75 and tgt["d"] < 160:
++        if not self.target_los:
++            return False
++        weapons = self._weapons()
++        gun_range = self.W["gun"]["range"]
++        if "gun" in weapons:
++            gun_range = weapons["gun"][1]["stats"]["range"]
++        health = self._enemy_health(target)
++        if health < 0.43 and target["d"] < gun_range * 0.85:
+             return True
+-        return False
++        if obs["alive"] <= 3 and target["d"] < gun_range * 0.65:
++            return self.hp_frac > 0.5 or health < self.hp_frac
++        early = self.t < self.cfg["zone"]["phases"][0]["hold_s"]
++        advantage = self.hp_frac > 0.78 and (len(weapons) > len(target.get("weapons", ())) or health < 0.65)
++        return not early and advantage and target["d"] < gun_range * 0.5
  
      def _should_retreat(self, tgt, enemies):
          my = self.me["hp"]
@@ -131,17 +219,21 @@ index 4dd3ec0..a1d7e73 100644
          close = [e for e in enemies if e["d"] < 120]
          if self.hp_frac < 0.3 and th > my * 0.8:
              return True
-@@ -358,56 +367,84 @@ class Bot:
-         close = [e for e in enemies if e["d"] < 170]
-         return len(close) >= 2
+@@ -355,59 +391,86 @@ class Bot:
+         return False
  
+     def _outnumbered(self, enemies):
+-        close = [e for e in enemies if e["d"] < 170]
+-        return len(close) >= 2
++        return sum(e["d"] < 170 and (e["clear"] or e["aggressor"]) for e in enemies) >= 2
++
 +    def _enemy_health(self, actor):
 +        maximum = actor.get("max_hp", self.mech["hp"])
 +        return actor.get("hp", maximum) / max(1, maximum)
 +
 +    def _size(self, actor):
 +        return 1 + self.cube_growth * actor.get("cubes", 0)
-+
+ 
      def _has_los(self, e):
          if self.nav is None:
              return True
@@ -252,7 +344,7 @@ index 4dd3ec0..a1d7e73 100644
          tt = 0.0
          sol = None
          for _ in range(3):
-@@ -418,11 +455,10 @@ class Bot:
+@@ -418,11 +481,10 @@ class Bot:
              if disc < 0 or d < 1:
                  break
              th = math.atan((v * v + math.sqrt(disc)) / (g * d))  # high arc: clears buildings
@@ -265,7 +357,7 @@ index 4dd3ec0..a1d7e73 100644
          self.mortar_sol = sol
          if sol is None:
              return (math.atan2(ey - y, ex - x), 0.0)
-@@ -462,29 +498,30 @@ class Bot:
+@@ -462,29 +524,30 @@ class Bot:
          fire = [False, False]
          me = self.me
          d3 = math.dist(self.pos, e["pos"])
@@ -311,7 +403,7 @@ index 4dd3ec0..a1d7e73 100644
                  if me["energy"] > cost + 8:
                      for o in enemies:
                          if o["d"] < rng * 0.95:
-@@ -494,39 +531,43 @@ class Bot:
+@@ -494,39 +557,43 @@ class Bot:
                                  break
              elif k == "laser":
                  charge = w.get("charge", 0) or 0
@@ -366,7 +458,7 @@ index 4dd3ec0..a1d7e73 100644
          A = [(x, y, mz)] + pts[:-1]
          return bool(self.nav.los_many(A, pts).all())
  
-@@ -537,7 +578,7 @@ class Bot:
+@@ -537,7 +604,7 @@ class Bot:
          fire = [False, False]
          d = math.dist(self.pos, p)
          eyaw, epitch = self._aim_err(aim)
@@ -375,7 +467,7 @@ index 4dd3ec0..a1d7e73 100644
          tol = math.atan2(rad * 0.8, max(1.0, d)) + 0.004
          x, y, z = self.pos
          if self.nav is not None and not self.nav.los((x, y, z + self.muzzle), p):
-@@ -545,9 +586,9 @@ class Bot:
+@@ -545,9 +612,9 @@ class Bot:
          for i, w in enumerate(self.me["weapons"]):
              if not w:
                  continue
@@ -387,7 +479,7 @@ index 4dd3ec0..a1d7e73 100644
                  fire[i] = True
          return fire
  
-@@ -559,7 +600,7 @@ class Bot:
+@@ -559,7 +626,7 @@ class Bot:
          if w.get("reload", 0) > 0:
              return
          ammo = w.get("ammo", 0)
@@ -396,7 +488,7 @@ index 4dd3ec0..a1d7e73 100644
          if ammo == 0 or (ammo < mag * 0.5 and (target is None or not self.target_los) and self.t - self.last_dmg_t > 1.5):
              act["reload"] = True
              act["fire"][i] = False
-@@ -626,7 +667,7 @@ class Bot:
+@@ -626,7 +693,7 @@ class Bot:
              want = 110.0
          else:
              want = 60.0
@@ -405,7 +497,7 @@ index 4dd3ec0..a1d7e73 100644
          if hpf_t < 0.25 and self.hp_frac > 0.4:
              want *= 0.7
          ux, uy = norm2(ex - x, ey - y)
-@@ -700,8 +741,8 @@ class Bot:
+@@ -700,8 +767,8 @@ class Bot:
              gz = n.ground_at(px, py) if (px, py) != (x, y) else z
              for e in threats:
                  ex, ey, ez = e["pos"]
@@ -416,7 +508,7 @@ index 4dd3ec0..a1d7e73 100644
          vis = n.los_many(np.array(A, np.float32), np.array(B, np.float32), step=2.0)
          k = len(threats)
          best, bs = None, 1e9
-@@ -730,7 +771,8 @@ class Bot:
+@@ -730,7 +797,8 @@ class Bot:
          """Step away from incoming mortar shells' landing points and laser lines aimed at us."""
          x, y, z = self.pos
          mx, my = move
@@ -426,7 +518,7 @@ index 4dd3ec0..a1d7e73 100644
          for p in obs.get("projectiles") or []:
              if p["kind"] != "mortar":
                  continue
-@@ -746,7 +788,7 @@ class Bot:
+@@ -746,7 +814,7 @@ class Bot:
                  continue
              lx, ly = px + vx * tt, py + vy * tt
              dd = math.hypot(lx - x, ly - y)
@@ -435,7 +527,7 @@ index 4dd3ec0..a1d7e73 100644
                  ax, ay = norm2(x - lx, y - ly) if dd > 0.5 else (math.cos(self.t), math.sin(self.t))
                  mx += ax * 2.0
                  my += ay * 2.0
-@@ -789,6 +831,39 @@ class Bot:
+@@ -789,6 +857,39 @@ class Bot:
          return jump, jet
  
      # ================================================================== no enemy in sight
@@ -475,7 +567,7 @@ index 4dd3ec0..a1d7e73 100644
      def _peaceful(self, obs, npcs, zone_goal):
          x, y, z = self.pos
          t = self.t
-@@ -802,8 +877,8 @@ class Bot:
+@@ -802,8 +903,8 @@ class Bot:
          for dr in obs.get("drops") or []:
              dp = dr["pos"]
              dd = math.dist((x, y), dp[:2])
@@ -486,7 +578,7 @@ index 4dd3ec0..a1d7e73 100644
                      return self._navigate(dp[:2]), None, "drop"
                  return (0.0, 0.0), None, "capturing"
  
-@@ -855,12 +930,12 @@ class Bot:
+@@ -855,12 +956,12 @@ class Bot:
          if best:
              dd, cp = best
              self.farm_kind = "crate"
@@ -501,7 +593,7 @@ index 4dd3ec0..a1d7e73 100644
              best = None
              for nn in npcs:
                  dd = math.dist((x, y), nn["pos"][:2])
-@@ -870,7 +945,9 @@ class Bot:
+@@ -870,7 +971,9 @@ class Bot:
                  dd, nn = best
                  self.farm_kind = "npc"
                  p = nn["pos"]
@@ -512,7 +604,7 @@ index 4dd3ec0..a1d7e73 100644
                  if dd > 85:
                      mv = self._navigate(p[:2])
                  elif dd < 55:
-@@ -919,7 +996,8 @@ class Bot:
+@@ -919,7 +1022,8 @@ class Bot:
          d = math.dist((x, y), nc)
          if d > max(3.0, nr * 0.35):
              mx, my = self._navigate(nc)
@@ -522,7 +614,7 @@ index 4dd3ec0..a1d7e73 100644
          return (0.0, 0.0)
  
      def _ground(self, p):
-@@ -961,12 +1039,4 @@ class Bot:
+@@ -961,12 +1065,4 @@ class Bot:
          return None
  
  
