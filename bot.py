@@ -19,6 +19,7 @@ TAU = 2 * math.pi
 DEBUG = bool(__import__('os').environ.get('BOTDEBUG'))
 
 WEAPON_VALUE = {"lightning": 3.0, "laser": 2.7, "mortar": 1.6, "gun": 0.0}
+GUN_DPS_UPGRADES = ("gun_damage", "gun_rate", "gun_mag")
 UPGRADE_ORDER = [
     "plating", "nanites", "armor", "gun_damage", "gun_rate", "lightning_efficiency", "laser_charge",
     "laser_damage", "servos", "gyros", "gun_mag", "lightning_range", "sensors", "gun_velocity",
@@ -44,6 +45,7 @@ class Bot:
         self.rng = random.Random(hello.get("seed", 1))
         self.mech = cfg["mech"]
         self.W = cfg["weapons"]
+        self.upgrades = {upgrade["id"]: upgrade["effects"] for upgrade in cfg["upgrades"]}
         self.cube_growth = cfg["cubes"]["size_per_cube"]
         self.sim_step = 1 / cfg["match"]["tick_hz"]
         self.decision_span = self.sim_step * cfg["match"]["decide_every"]
@@ -238,13 +240,26 @@ class Bot:
         self.threats = [th for th in self.threats if t - th[1] < 4.0][-30:]
 
     def _pick_upgrade(self, offer):
-        ids = [c["id"] for c in offer["choices"]]
-        best, bi = 1e9, 0
-        for i, u in enumerate(ids):
-            r = UPGRADE_ORDER.index(u) if u in UPGRADE_ORDER else 50
-            if r < best:
-                best, bi = r, i
-        return bi
+        ranks = {upgrade: index for index, upgrade in enumerate(UPGRADE_ORDER)}
+        gun = self._weapons().get("gun")
+        if gun and any(choice["id"] in GUN_DPS_UPGRADES for choice in offer["choices"]):
+            stats = gun[1]["stats"]
+            dps_ranks = sorted(ranks[upgrade] for upgrade in GUN_DPS_UPGRADES)
+            dps_order = sorted(GUN_DPS_UPGRADES, key=lambda upgrade: self._gun_dps_after(stats, upgrade),
+                               reverse=True)
+            ranks.update(zip(dps_order, dps_ranks))
+        return min(range(len(offer["choices"])),
+                   key=lambda index: ranks.get(offer["choices"][index]["id"], len(ranks)), default=0)
+
+    def _gun_dps_after(self, stats, upgrade):
+        updated = dict(stats)
+        for effect in self.upgrades.get(upgrade, ()):
+            scope, _, stat = effect["path"].rpartition(".")
+            if scope == "weapons.gun" and stat in updated:
+                updated[stat] = updated[stat] * effect.get("mul", 1) + effect.get("add", 0)
+        mag = updated["mag"]
+        cycle = (mag - 1) * updated["cooldown"] + updated["reload"]
+        return updated["damage"] * mag / max(self.sim_step, cycle)
 
     def _weapons(self):
         out = {}
