@@ -1,0 +1,29 @@
+name: Docker conformance
+on:
+  push:
+    branches: [codex/docker-check]
+permissions:
+  contents: read
+jobs:
+  conformance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Prepare the bot and official kit
+        shell: bash
+        run: |
+          if [[ -f candidate.patch ]]; then
+            git apply --check candidate.patch
+            git apply candidate.patch
+          fi
+          curl -fsSL --retry 2 https://www.joinbuilders.org/buildathon/tracks/builders/files/mechfight-kit.tar.gz -o "$RUNNER_TEMP/kit.tar.gz"
+          echo "1758fe9125e193b268c6c1cffbf2c0ae96377214ab06d117412571c1523065ba  $RUNNER_TEMP/kit.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/kit.tar.gz" -C "$RUNNER_TEMP"
+      - name: Build the Linux amd64 image
+        run: docker build --platform linux/amd64 -t my-bot .
+      - name: Run the official sandboxed check
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/mechfight-kit"
+          python3 check/check.py --map-dir /arena -- docker run --rm -i --network none --cpus 1 --memory 512m --read-only --tmpfs /tmp:rw,size=64m --user 65534:65534 -v "$PWD/arena:/arena:ro" my-bot
